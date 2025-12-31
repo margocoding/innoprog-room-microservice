@@ -274,6 +274,9 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
     if (room.completed) return;
 
+    // Получаем текущую активную комнату для сохранения настроек
+    const activeRoom = this.activeRooms.find((r) => r.id === room.id);
+
     const updatedRoom = await this.roomService.editRoom(room.id, {
       studentCursorEnabled: data.studentCursorEnabled,
       studentEditCodeEnabled: data.studentEditCodeEnabled,
@@ -283,17 +286,24 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       taskId: data.taskId,
     });
 
-    this.activeRooms = this.activeRooms.map((activeRoom) => {
-      if (activeRoom.id === updatedRoom.id) {
+    this.activeRooms = this.activeRooms.map((activeRoomItem) => {
+      if (activeRoomItem.id === updatedRoom.id) {
         return {
-          ...activeRoom,
-          studentCursorEnabled: Boolean(data.studentCursorEnabled),
-          studentEditCodeEnabled: Boolean(data.studentEditCodeEnabled),
-          studentSelectionEnabled: Boolean(data.studentSelectionEnabled),
+          ...activeRoomItem,
+          // Используем переданные значения или сохраняем текущие из activeRoom или room
+          studentCursorEnabled: data.studentCursorEnabled !== undefined 
+            ? Boolean(data.studentCursorEnabled)
+            : (activeRoom?.studentCursorEnabled ?? room.studentCursorEnabled),
+          studentEditCodeEnabled: data.studentEditCodeEnabled !== undefined 
+            ? Boolean(data.studentEditCodeEnabled)
+            : (activeRoom?.studentEditCodeEnabled ?? room.studentEditCodeEnabled),
+          studentSelectionEnabled: data.studentSelectionEnabled !== undefined 
+            ? Boolean(data.studentSelectionEnabled)
+            : (activeRoom?.studentSelectionEnabled ?? room.studentSelectionEnabled),
         };
       }
 
-      return activeRoom;
+      return activeRoomItem;
     });
 
     this.server
