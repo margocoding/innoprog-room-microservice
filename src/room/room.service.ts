@@ -28,14 +28,28 @@ export class RoomService {
 
   async editRoom(id: string, dto: EditRoomDto): Promise<RoomRdo> {
     try {
+      const currentRoom = await this.prisma.room.findUnique({
+        where: { id, teacher: dto.telegramId },
+      });
+
+      if (!currentRoom) {
+        throw new NotFoundException('Room not found');
+      }
+
       const editedRoom = await this.prisma.room.update({
         where: { id, teacher: dto.telegramId },
         data: {
-          taskId: dto.taskId,
-          language: dto.language,
-          studentCursorEnabled: dto.studentCursorEnabled,
-          studentSelectionEnabled: dto.studentSelectionEnabled,
-          studentEditCodeEnabled: dto.studentEditCodeEnabled,
+          ...(dto.taskId !== undefined && { taskId: dto.taskId }),
+          ...(dto.language !== undefined && { language: dto.language }),
+          studentCursorEnabled: dto.studentCursorEnabled !== undefined 
+            ? dto.studentCursorEnabled 
+            : currentRoom.studentCursorEnabled,
+          studentSelectionEnabled: dto.studentSelectionEnabled !== undefined 
+            ? dto.studentSelectionEnabled 
+            : currentRoom.studentSelectionEnabled,
+          studentEditCodeEnabled: dto.studentEditCodeEnabled !== undefined 
+            ? dto.studentEditCodeEnabled 
+            : currentRoom.studentEditCodeEnabled,
         }
       });
 
