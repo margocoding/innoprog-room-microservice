@@ -11,7 +11,6 @@ RUN yarn install
 COPY . .
 
 RUN yarn prisma generate
-RUN yarn prisma migrate deploy
 
 RUN yarn run build
 
