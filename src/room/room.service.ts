@@ -10,7 +10,7 @@ import { RoomRdo } from './rdo/room-rdo';
 export class RoomService {
   private readonly logger: Logger = new Logger();
 
-  constructor(private readonly prisma: PrismaService) { }
+  constructor(private readonly prisma: PrismaService) {}
 
   async createRoom(dto: CreateRoomDto): Promise<RoomRdo> {
     const room = await this.prisma.room.create({
@@ -41,16 +41,19 @@ export class RoomService {
         data: {
           ...(dto.taskId !== undefined && { taskId: dto.taskId }),
           ...(dto.language !== undefined && { language: dto.language }),
-          studentCursorEnabled: dto.studentCursorEnabled !== undefined 
-            ? dto.studentCursorEnabled 
-            : currentRoom.studentCursorEnabled,
-          studentSelectionEnabled: dto.studentSelectionEnabled !== undefined 
-            ? dto.studentSelectionEnabled 
-            : currentRoom.studentSelectionEnabled,
-          studentEditCodeEnabled: dto.studentEditCodeEnabled !== undefined 
-            ? dto.studentEditCodeEnabled 
-            : currentRoom.studentEditCodeEnabled,
-        }
+          studentCursorEnabled:
+            dto.studentCursorEnabled !== undefined
+              ? dto.studentCursorEnabled
+              : currentRoom.studentCursorEnabled,
+          studentSelectionEnabled:
+            dto.studentSelectionEnabled !== undefined
+              ? dto.studentSelectionEnabled
+              : currentRoom.studentSelectionEnabled,
+          studentEditCodeEnabled:
+            dto.studentEditCodeEnabled !== undefined
+              ? dto.studentEditCodeEnabled
+              : currentRoom.studentEditCodeEnabled,
+        },
       });
 
       return fillDto(RoomRdo, editedRoom);
@@ -60,7 +63,10 @@ export class RoomService {
     }
   }
 
-  async deleteRoom(id: string, telegramId: string): Promise<{ success: boolean }> {
+  async deleteRoom(
+    id: string,
+    telegramId: string,
+  ): Promise<{ success: boolean }> {
     try {
       await this.prisma.room.delete({ where: { id, teacher: telegramId } });
 
@@ -117,6 +123,39 @@ export class RoomService {
       this.logger.error(`Cannoe complete a room: ${e}`);
       throw new NotFoundException('Room not found');
     }
+  }
+
+  async getRoomSnapshot(roomId: string): Promise<string | null> {
+    const latestLog = await this.prisma.log.findFirst({
+      where: { roomId },
+      orderBy: { createdAt: 'desc' },
+      select: { code: true },
+    });
+
+    return latestLog?.code ?? null;
+  }
+
+  async saveRoomSnapshot(roomId: string, snapshot: string): Promise<void> {
+    const latestLog = await this.prisma.log.findFirst({
+      where: { roomId },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true },
+    });
+
+    if (latestLog) {
+      await this.prisma.log.update({
+        where: { id: latestLog.id },
+        data: { code: snapshot },
+      });
+      return;
+    }
+
+    await this.prisma.log.create({
+      data: {
+        roomId,
+        code: snapshot,
+      },
+    });
   }
 
   async joinRoom(id: string, member: string) {

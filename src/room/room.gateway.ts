@@ -13,8 +13,7 @@ import { EditRoomDto } from './dto/edit-room-dto';
 import { RoomRdo } from './rdo/room-rdo';
 import { RoomService } from './room.service';
 import * as Y from 'yjs';
-import { PrismaService } from '../prisma/prisma.service';
-import { UseGuards } from '@nestjs/common';
+import { Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
 
 interface JoinPayload {
@@ -104,13 +103,17 @@ interface CodeEditPayload {
 })
 @UseGuards(AuthRoomGuard)
 export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+  private readonly logger = new Logger(RoomGateway.name);
+  private readonly SNAPSHOT_INTERVAL_MS = Number(
+    process.env.ROOM_SNAPSHOT_INTERVAL_MS ?? 30_000,
+  );
   private docs = new Map<string, Y.Doc>();
+  private docInitTasks = new Map<string, Promise<Y.Doc>>();
   private timers = new Map<string, NodeJS.Timeout>();
+  private snapshotDirtyRooms = new Set<string>();
+  private snapshotSavingRooms = new Set<string>();
 
-  constructor(
-    private readonly roomService: RoomService,
-    private readonly prisma: PrismaService,
-  ) { }
+  constructor(private readonly roomService: RoomService) {}
 
   activeRooms: Room[] = [];
 
@@ -142,7 +145,6 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return colors[Math.abs(hash) % colors.length];
   }
 
-
   @SubscribeMessage('join-room') async handleJoinRoom(
     @MessageBody() data: JoinPayload,
     @ConnectedSocket() client: Socket,
@@ -150,7 +152,6 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const { telegramId, roomId, username } = data;
 
     let room = await this.roomService.getRoom(roomId);
-
 
     if (!room) {
       client.emit('join-room:error', { message: 'Комната не найдена' });
@@ -179,6 +180,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         teacher: room.teacher,
       };
       this.activeRooms.push(activeRoom);
+      this.startSnapshotTimer(room.id);
     }
 
     const existingMember = activeRoom?.members.find(
@@ -235,7 +237,6 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         username: m.username,
       }));
 
-
     client.emit('joined', {
       telegramId,
       currentCursors,
@@ -252,8 +253,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       completed: room.completed,
     });
 
+    const doc = await this.getOrCreateDoc(room.id);
+
     client.emit('code-edit-action', {
-      update: Y.encodeStateAsUpdate(this.getOrCreateDoc(room.id))
+      update: Y.encodeStateAsUpdate(doc),
     });
 
     client.emit('selection-state', {
@@ -291,15 +294,20 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return {
           ...activeRoomItem,
           // Используем переданные значения или сохраняем текущие из activeRoom или room
-          studentCursorEnabled: data.studentCursorEnabled !== undefined 
-            ? Boolean(data.studentCursorEnabled)
-            : (activeRoom?.studentCursorEnabled ?? room.studentCursorEnabled),
-          studentEditCodeEnabled: data.studentEditCodeEnabled !== undefined 
-            ? Boolean(data.studentEditCodeEnabled)
-            : (activeRoom?.studentEditCodeEnabled ?? room.studentEditCodeEnabled),
-          studentSelectionEnabled: data.studentSelectionEnabled !== undefined 
-            ? Boolean(data.studentSelectionEnabled)
-            : (activeRoom?.studentSelectionEnabled ?? room.studentSelectionEnabled),
+          studentCursorEnabled:
+            data.studentCursorEnabled !== undefined
+              ? Boolean(data.studentCursorEnabled)
+              : (activeRoom?.studentCursorEnabled ?? room.studentCursorEnabled),
+          studentEditCodeEnabled:
+            data.studentEditCodeEnabled !== undefined
+              ? Boolean(data.studentEditCodeEnabled)
+              : (activeRoom?.studentEditCodeEnabled ??
+                room.studentEditCodeEnabled),
+          studentSelectionEnabled:
+            data.studentSelectionEnabled !== undefined
+              ? Boolean(data.studentSelectionEnabled)
+              : (activeRoom?.studentSelectionEnabled ??
+                room.studentSelectionEnabled),
         };
       }
 
@@ -377,8 +385,6 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (member) {
       member.lastActivity = new Date();
 
-
-
       if (
         data.line &&
         typeof data.column === 'number' &&
@@ -419,7 +425,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  @SubscribeMessage('code-edit') handleCodeEdit(
+  @SubscribeMessage('code-edit') async handleCodeEdit(
     client: Socket,
     data: CodeEditPayload,
   ) {
@@ -456,9 +462,10 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       member.lastActivity = new Date();
     }
 
-    const doc = this.getOrCreateDoc(data.roomId);
+    const doc = await this.getOrCreateDoc(data.roomId);
 
     Y.applyUpdate(doc, data.update);
+    this.snapshotDirtyRooms.add(data.roomId);
 
     client.broadcast.to(activeRoom.id).emit('code-edit-action', {
       telegramId: data.telegramId,
@@ -468,7 +475,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
   }
 
-  @SubscribeMessage('edit-member') async handleEditMember(
+  @SubscribeMessage('edit-member') handleEditMember(
     client: Socket,
     data: EditMember,
   ) {
@@ -484,7 +491,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       (m) => m.telegramId === data.changeTelegramId,
     );
 
-    if (member && (member.telegramId === data.telegramId || activeRoom.teacher === data.telegramId)) {
+    if (
+      member &&
+      (member.telegramId === data.telegramId ||
+        activeRoom.teacher === data.telegramId)
+    ) {
       member.username = data.username;
 
       this.server.to(activeRoom.id).emit('members-updated', {
@@ -507,31 +518,33 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client: Socket,
     data: JoinPayload,
   ) {
-    const activeRoom = await this.roomService.getRoom(data.roomId);
+    const room = await this.roomService.getRoom(data.roomId);
 
-    if (!activeRoom || activeRoom.teacher !== data.telegramId) {
+    if (!room || room.teacher !== data.telegramId) {
       client.emit('error', {
         message: 'Комната не найдена',
       });
       return;
     }
 
-    if (activeRoom.completed) return;
+    if (room.completed) return;
+
+    await this.flushRoomSnapshot(data.roomId, { force: true });
 
     await this.roomService.completeRoom(data.roomId);
 
-
     this.activeRooms = this.activeRooms.filter(
-      (room) => room.id !== activeRoom.id,
+      (activeRoom) => activeRoom.id !== room.id,
     );
 
-    this.server.to(activeRoom.id).emit('complete-session', {
+    this.cleanupRoomState(room.id);
+
+    this.server.to(room.id).emit('complete-session', {
       message: 'Учитель завершил сессию',
     });
   }
 
-  handleDisconnect(client: Socket) {
-
+  async handleDisconnect(client: Socket) {
     for (const room of this.activeRooms) {
       const member = room.members.find((m) => m.clientId === client.id);
       if (member) {
@@ -573,12 +586,15 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // Проверяем, остались ли онлайн участники
         const onlineMembers = room.members.filter((m) => m.online);
         if (onlineMembers.length === 0) {
+          await this.flushRoomSnapshot(room.id, { force: true });
 
           // Удаляем комнату из активных
           const roomIndex = this.activeRooms.findIndex((r) => r.id === room.id);
           if (roomIndex > -1) {
             this.activeRooms.splice(roomIndex, 1);
           }
+
+          this.cleanupRoomState(room.id);
         }
 
         break;
@@ -586,13 +602,112 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  private getOrCreateDoc(roomId: string): Y.Doc {
-    if (!this.docs.has(roomId)) {
-      const doc = new Y.Doc();
-      this.docs.set(roomId, doc);
+  private startSnapshotTimer(roomId: string): void {
+    if (this.timers.has(roomId)) {
+      return;
     }
-    return this.docs.get(roomId)!;
+
+    const timer = setInterval(() => {
+      void this.flushRoomSnapshot(roomId);
+    }, this.SNAPSHOT_INTERVAL_MS);
+
+    this.timers.set(roomId, timer);
   }
 
-  handleConnection(client: any, ...args: any[]) { }
+  private cleanupRoomState(roomId: string): void {
+    const timer = this.timers.get(roomId);
+    if (timer) {
+      clearInterval(timer);
+      this.timers.delete(roomId);
+    }
+
+    this.snapshotDirtyRooms.delete(roomId);
+    this.snapshotSavingRooms.delete(roomId);
+    this.docInitTasks.delete(roomId);
+
+    const doc = this.docs.get(roomId);
+    if (doc) {
+      doc.destroy();
+      this.docs.delete(roomId);
+    }
+  }
+
+  private async flushRoomSnapshot(
+    roomId: string,
+    options: { force?: boolean } = {},
+  ): Promise<void> {
+    const { force = false } = options;
+
+    if (!force && !this.snapshotDirtyRooms.has(roomId)) {
+      return;
+    }
+
+    if (this.snapshotSavingRooms.has(roomId)) {
+      return;
+    }
+
+    const doc = this.docs.get(roomId);
+    if (!doc) {
+      return;
+    }
+
+    this.snapshotSavingRooms.add(roomId);
+
+    try {
+      const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc)).toString(
+        'base64',
+      );
+      await this.roomService.saveRoomSnapshot(roomId, snapshot);
+      this.snapshotDirtyRooms.delete(roomId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Cannot persist room snapshot for room ${roomId}: ${message}`,
+      );
+    } finally {
+      this.snapshotSavingRooms.delete(roomId);
+    }
+  }
+
+  private async getOrCreateDoc(roomId: string): Promise<Y.Doc> {
+    const existingDoc = this.docs.get(roomId);
+    if (existingDoc) {
+      return existingDoc;
+    }
+
+    const pendingTask = this.docInitTasks.get(roomId);
+    if (pendingTask) {
+      return pendingTask;
+    }
+
+    const initTask = (async () => {
+      const doc = new Y.Doc();
+      const snapshot = await this.roomService.getRoomSnapshot(roomId);
+
+      if (snapshot) {
+        try {
+          Y.applyUpdate(doc, Buffer.from(snapshot, 'base64'));
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.warn(
+            `Cannot apply saved snapshot for room ${roomId}: ${message}`,
+          );
+        }
+      }
+
+      this.docs.set(roomId, doc);
+      return doc;
+    })();
+
+    this.docInitTasks.set(roomId, initTask);
+
+    try {
+      return await initTask;
+    } finally {
+      this.docInitTasks.delete(roomId);
+    }
+  }
+
+  handleConnection() {}
 }
