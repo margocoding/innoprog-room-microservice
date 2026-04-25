@@ -94,6 +94,7 @@ export class RoomService {
     const [rooms, total] = await Promise.all([
       this.prisma.room.findMany({
         where,
+        orderBy: { createdAt: 'desc' },
         skip: (+page - 1) * +limit,
         take: +limit,
       }),

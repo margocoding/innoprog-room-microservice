@@ -56,4 +56,11 @@ export class RoomRdo {
   @ApiProperty({ title: 'Language', enum: Language, example: Language.js })
   @Expose()
   public language: Language;
+
+  @ApiProperty({
+    title: 'Room creation date',
+    example: '2026-04-25T15:30:00.000Z',
+  })
+  @Expose()
+  public createdAt: Date;
 }
