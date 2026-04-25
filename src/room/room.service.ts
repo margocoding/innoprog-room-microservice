@@ -94,6 +94,14 @@ export class RoomService {
     const [rooms, total] = await Promise.all([
       this.prisma.room.findMany({
         where,
+        include: {
+          roomMembers: {
+            select: {
+              telegramId: true,
+              username: true,
+            },
+          },
+        },
         orderBy: { createdAt: 'desc' },
         skip: (+page - 1) * +limit,
         take: +limit,
@@ -101,7 +109,21 @@ export class RoomService {
       this.prisma.room.count({ where }),
     ]);
 
-    return { rooms: rooms.map((room) => fillDto(RoomRdo, room)), total };
+    return {
+      rooms: rooms.map((room) =>
+        fillDto(RoomRdo, {
+          ...room,
+          students: room.students.map((studentTelegramId) => {
+            const roomMember = room.roomMembers.find(
+              (member) => member.telegramId === studentTelegramId,
+            );
+
+            return roomMember?.username || studentTelegramId;
+          }),
+        }),
+      ),
+      total,
+    };
   }
 
   async getRoom(id: string) {
@@ -182,5 +204,24 @@ export class RoomService {
     });
 
     return fillDto(RoomRdo, updatedRoom);
+  }
+
+  async upsertRoomMember(roomId: string, telegramId: string, username?: string) {
+    await this.prisma.roomMember.upsert({
+      where: {
+        telegramId_roomId: {
+          telegramId,
+          roomId,
+        },
+      },
+      create: {
+        roomId,
+        telegramId,
+        username,
+      },
+      update: {
+        ...(username !== undefined ? { username } : {}),
+      },
+    });
   }
 }

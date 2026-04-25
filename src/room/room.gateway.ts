@@ -165,6 +165,8 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       room = await this.roomService.joinRoom(room.id, telegramId);
     }
 
+    await this.roomService.upsertRoomMember(room.id, telegramId, username);
+
     await client.join(roomId);
 
     let activeRoom = this.activeRooms.find((r) => r.id === room.id);
@@ -497,6 +499,11 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         activeRoom.teacher === data.telegramId)
     ) {
       member.username = data.username;
+      void this.roomService.upsertRoomMember(
+        data.roomId,
+        data.changeTelegramId,
+        data.username,
+      );
 
       this.server.to(activeRoom.id).emit('members-updated', {
         members: activeRoom.members.map((member) => ({
