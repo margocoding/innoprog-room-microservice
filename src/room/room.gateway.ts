@@ -93,6 +93,11 @@ interface CodeEditPayload {
   update: Uint8Array;
 }
 
+interface SocketMembership {
+  roomId: string;
+  telegramId: string;
+}
+
 @WebSocketGateway({
   cors: {
     origin: '*',
@@ -112,12 +117,124 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private timers = new Map<string, NodeJS.Timeout>();
   private snapshotDirtyRooms = new Set<string>();
   private snapshotSavingRooms = new Set<string>();
+  private socketMemberships = new Map<string, Map<string, SocketMembership>>();
 
   constructor(private readonly roomService: RoomService) {}
 
   activeRooms: Room[] = [];
 
   @WebSocketServer() server: Server;
+
+  private getMemberPayload(room: Room) {
+    return room.members.map((member) => ({
+      telegramId: member.telegramId,
+      username: member.username,
+      online: member.online,
+      userColor: member.userColor,
+      lastActivity: member.lastActivity,
+    }));
+  }
+
+  private emitMembersUpdated(room: Room, trigger: string, telegramId: string) {
+    this.server.to(room.id).emit('members-updated', {
+      members: this.getMemberPayload(room),
+      trigger,
+      telegramId,
+    });
+  }
+
+  private rememberSocketMembership(
+    clientId: string,
+    roomId: string,
+    telegramId: string,
+  ) {
+    const memberships =
+      this.socketMemberships.get(clientId) ??
+      new Map<string, SocketMembership>();
+    memberships.set(roomId, { roomId, telegramId });
+    this.socketMemberships.set(clientId, memberships);
+  }
+
+  private forgetSocketMembership(clientId: string, roomId: string) {
+    const memberships = this.socketMemberships.get(clientId);
+    if (!memberships) {
+      return;
+    }
+
+    memberships.delete(roomId);
+    if (memberships.size === 0) {
+      this.socketMemberships.delete(clientId);
+    }
+  }
+
+  private async markSocketLeft(
+    client: Socket,
+    options: { exceptRoomId?: string } = {},
+  ) {
+    const rememberedMemberships = this.socketMemberships.get(client.id);
+    const rememberedRoomIds = new Set(rememberedMemberships?.keys() ?? []);
+    const roomsToCheck = this.activeRooms.filter(
+      (room) =>
+        rememberedRoomIds.has(room.id) ||
+        room.members.some((member) => member.clientId === client.id),
+    );
+
+    for (const room of roomsToCheck) {
+      if (room.id === options.exceptRoomId) {
+        continue;
+      }
+
+      const members = room.members.filter((m) => m.clientId === client.id);
+      if (members.length === 0) {
+        this.forgetSocketMembership(client.id, room.id);
+        continue;
+      }
+
+      for (const member of members) {
+        member.online = false;
+        member.lastSelection = undefined;
+        this.forgetSocketMembership(client.id, room.id);
+
+        try {
+          await client.leave(room.id);
+        } catch {
+          // Socket.IO can already have removed the socket from all rooms.
+        }
+
+        this.server.to(room.id).emit('member-left', {
+          telegramId: member.telegramId,
+          keepCursor: true,
+        });
+
+        this.emitMembersUpdated(room, 'leave', member.telegramId);
+      }
+
+      const currentSelections = room.members
+        .filter((m) => m.lastSelection && m.online)
+        .map((m) => ({
+          telegramId: m.telegramId,
+          ...m.lastSelection,
+          userColor: m.userColor,
+        }));
+
+      this.server.to(room.id).emit('selection-state', {
+        selections: currentSelections,
+        updatedUser: members[members.length - 1].telegramId,
+      });
+
+      const onlineMembers = room.members.filter((m) => m.online);
+      if (onlineMembers.length === 0) {
+        await this.flushRoomSnapshot(room.id, { force: true });
+
+        const roomIndex = this.activeRooms.findIndex((r) => r.id === room.id);
+        if (roomIndex > -1) {
+          this.activeRooms.splice(roomIndex, 1);
+        }
+
+        this.cleanupRoomState(room.id);
+      }
+    }
+  }
 
   private generateUserColor(userId: string): string {
     const colors = [
@@ -167,7 +284,8 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
     await this.roomService.upsertRoomMember(room.id, telegramId, username);
 
-    await client.join(roomId);
+    await this.markSocketLeft(client, { exceptRoomId: room.id });
+    await client.join(room.id);
 
     let activeRoom = this.activeRooms.find((r) => r.id === room.id);
 
@@ -207,19 +325,8 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
     }
 
-    // Отправляем обновленный список участников всем в комнате
-    this.server.to(roomId).emit('members-updated', {
-      members: activeRoom?.members.map((member) => ({
-        telegramId: member.telegramId,
-        username: member.username,
-        isYourself: member.telegramId === telegramId,
-        online: member.online,
-        userColor: member.userColor,
-        lastActivity: member.lastActivity,
-      })),
-      trigger: 'join',
-      telegramId: telegramId,
-    });
+    this.rememberSocketMembership(client.id, activeRoom.id, telegramId);
+    this.emitMembersUpdated(activeRoom, 'join', telegramId);
 
     const currentCursors = activeRoom?.members
       .filter((m) => m.lastCursorPosition && m.online)
@@ -505,17 +612,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
         data.username,
       );
 
-      this.server.to(activeRoom.id).emit('members-updated', {
-        members: activeRoom.members.map((member) => ({
-          telegramId: member.telegramId,
-          username: member.username,
-          online: member.online,
-          userColor: member.userColor,
-          lastActivity: member.lastActivity,
-        })),
-        trigger: 'username-update',
-        telegramId: data.telegramId,
-      });
+      this.emitMembersUpdated(activeRoom, 'username-update', data.telegramId);
     } else {
       return client.emit('error', { message: 'Участник не найден в комнате' });
     }
@@ -552,61 +649,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   async handleDisconnect(client: Socket) {
-    for (const room of this.activeRooms) {
-      const member = room.members.find((m) => m.clientId === client.id);
-      if (member) {
-        member.online = false;
-        member.lastSelection = undefined;
-
-        this.server.to(room.id).emit('member-left', {
-          telegramId: member.telegramId,
-          keepCursor: true,
-        });
-
-        // Отправляем обновленный список участников всем в комнате
-        this.server.to(room.id).emit('members-updated', {
-          members: room.members.map((member) => ({
-            telegramId: member.telegramId,
-            username: member.username,
-            online: member.online,
-            userColor: member.userColor,
-            lastActivity: member.lastActivity,
-          })),
-          trigger: 'leave',
-          telegramId: member.telegramId,
-        });
-
-        // Отправляем обновленное состояние выделений
-        const currentSelections = room.members
-          .filter((m) => m.lastSelection && m.online)
-          .map((m) => ({
-            telegramId: m.telegramId,
-            ...m.lastSelection,
-            userColor: m.userColor,
-          }));
-
-        this.server.to(room.id).emit('selection-state', {
-          selections: currentSelections,
-          updatedUser: member.telegramId,
-        });
-
-        // Проверяем, остались ли онлайн участники
-        const onlineMembers = room.members.filter((m) => m.online);
-        if (onlineMembers.length === 0) {
-          await this.flushRoomSnapshot(room.id, { force: true });
-
-          // Удаляем комнату из активных
-          const roomIndex = this.activeRooms.findIndex((r) => r.id === room.id);
-          if (roomIndex > -1) {
-            this.activeRooms.splice(roomIndex, 1);
-          }
-
-          this.cleanupRoomState(room.id);
-        }
-
-        break;
-      }
-    }
+    await this.markSocketLeft(client);
   }
 
   private startSnapshotTimer(roomId: string): void {
