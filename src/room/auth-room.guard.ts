@@ -5,6 +5,9 @@ import { AppService } from 'src/app.service';
 const isRoomGeneratedTelegramId = (telegramId?: string): boolean =>
     Boolean(telegramId && /^i\d+$/.test(telegramId));
 
+const isDecryptedTelegramId = (telegramId?: string): boolean =>
+    Boolean(telegramId && /^\d+$/.test(telegramId));
+
 const getRefererTelegramId = (client: any): string | undefined => {
     const referer = client?.handshake?.headers?.referer;
     if (!referer || typeof referer !== 'string') {
@@ -21,6 +24,25 @@ const getRefererTelegramId = (client: any): string | undefined => {
 @Injectable()
 export class AuthRoomGuard implements CanActivate {
     constructor(private readonly appService: AppService) { }
+
+    private normalizeTelegramId(telegramId?: string): string | undefined {
+        if (!telegramId) {
+            return `i${Math.floor(Math.random() * 1000000)}`;
+        }
+
+        if (isRoomGeneratedTelegramId(telegramId) || isDecryptedTelegramId(telegramId)) {
+            return telegramId;
+        }
+
+        return this.appService.decryptTelegramId(telegramId);
+    }
+
+    private isValidTelegramId(telegramId?: string): telegramId is string {
+        return Boolean(
+            telegramId &&
+            (isRoomGeneratedTelegramId(telegramId) || isDecryptedTelegramId(telegramId)),
+        );
+    }
 
     async canActivate(context: ExecutionContext): Promise<boolean> {
         const type = context.getType<'ws' | 'http'>();
@@ -39,13 +61,9 @@ export class AuthRoomGuard implements CanActivate {
                 telegramId = refererTelegramId;
             }
 
-            if (!telegramId) {
-                telegramId = `i${Math.floor(Math.random() * 1000000)}`;
-            } else if (!isRoomGeneratedTelegramId(telegramId)) {
-                telegramId = this.appService.decryptTelegramId(telegramId);
-            }
+            telegramId = this.normalizeTelegramId(telegramId);
 
-            if (!telegramId || (!isRoomGeneratedTelegramId(telegramId) && isNaN(Number(telegramId)))) {
+            if (!this.isValidTelegramId(telegramId)) {
                 client.emit('join-room:error', { message: 'Неверная ссылка. Пожалуйста, обратитесь к администратору' });
                 return false;
             }
@@ -57,13 +75,9 @@ export class AuthRoomGuard implements CanActivate {
 
             telegramId = request.query.telegramId || request.params.telegramId || request.body.telegramId;
 
-            if (!telegramId) {
-                telegramId = `i${Math.floor(Math.random() * 1000000)}`;
-            } else if (!isRoomGeneratedTelegramId(telegramId)) {
-                telegramId = this.appService.decryptTelegramId(telegramId);
-            }
+            telegramId = this.normalizeTelegramId(telegramId);
 
-            if (!telegramId || (!isRoomGeneratedTelegramId(telegramId) && isNaN(Number(telegramId)))) {
+            if (!this.isValidTelegramId(telegramId)) {
                 request.res?.status(400).json({ message: 'Неверная ссылка. Пожалуйста, обратитесь к администратору' });
                 return false;
             }
