@@ -5,6 +5,19 @@ import { AppService } from 'src/app.service';
 const isRoomGeneratedTelegramId = (telegramId?: string): boolean =>
     Boolean(telegramId && /^i\d+$/.test(telegramId));
 
+const getRefererTelegramId = (client: any): string | undefined => {
+    const referer = client?.handshake?.headers?.referer;
+    if (!referer || typeof referer !== 'string') {
+        return undefined;
+    }
+
+    try {
+        return new URL(referer).searchParams.get('telegramId') ?? undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 @Injectable()
 export class AuthRoomGuard implements CanActivate {
     constructor(private readonly appService: AppService) { }
@@ -20,6 +33,11 @@ export class AuthRoomGuard implements CanActivate {
             client = context.switchToWs().getClient();
 
             telegramId = data.telegramId;
+            const refererTelegramId = getRefererTelegramId(client);
+
+            if (refererTelegramId && (!telegramId || isRoomGeneratedTelegramId(telegramId))) {
+                telegramId = refererTelegramId;
+            }
 
             if (!telegramId) {
                 telegramId = `i${Math.floor(Math.random() * 1000000)}`;
