@@ -2,6 +2,9 @@ import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Request } from 'express';
 import { AppService } from 'src/app.service';
 
+const isRoomGeneratedTelegramId = (telegramId?: string): boolean =>
+    Boolean(telegramId && /^i\d+$/.test(telegramId));
+
 @Injectable()
 export class AuthRoomGuard implements CanActivate {
     constructor(private readonly appService: AppService) { }
@@ -20,11 +23,11 @@ export class AuthRoomGuard implements CanActivate {
 
             if (!telegramId) {
                 telegramId = `i${Math.floor(Math.random() * 1000000)}`;
-            } else if (!telegramId.startsWith('i')) {
+            } else if (!isRoomGeneratedTelegramId(telegramId)) {
                 telegramId = this.appService.decryptTelegramId(telegramId);
             }
 
-            if (!telegramId || (!telegramId.startsWith('i') && isNaN(Number(telegramId)))) {
+            if (!telegramId || (!isRoomGeneratedTelegramId(telegramId) && isNaN(Number(telegramId)))) {
                 client.emit('join-room:error', { message: 'Неверная ссылка. Пожалуйста, обратитесь к администратору' });
                 return false;
             }
@@ -38,11 +41,11 @@ export class AuthRoomGuard implements CanActivate {
 
             if (!telegramId) {
                 telegramId = `i${Math.floor(Math.random() * 1000000)}`;
-            } else if (!telegramId.startsWith('i')) {
+            } else if (!isRoomGeneratedTelegramId(telegramId)) {
                 telegramId = this.appService.decryptTelegramId(telegramId);
             }
 
-            if (!telegramId || (!telegramId.startsWith('i') && isNaN(Number(telegramId)))) {
+            if (!telegramId || (!isRoomGeneratedTelegramId(telegramId) && isNaN(Number(telegramId)))) {
                 request.res?.status(400).json({ message: 'Неверная ссылка. Пожалуйста, обратитесь к администратору' });
                 return false;
             }

@@ -107,6 +107,27 @@ describe('RoomGateway membership sync', () => {
     });
   });
 
+  it('replaces a previous identity on the same socket in one room', async () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket-1');
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'i123456', roomId: 'room-1', username: 'User' },
+      client,
+    );
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1', username: 'Teacher' },
+      client,
+    );
+
+    expect(gateway.activeRooms[0].members).toHaveLength(1);
+    expect(gateway.activeRooms[0].members[0]).toMatchObject({
+      telegramId: 'teacher-1',
+      clientId: 'socket-1',
+      online: true,
+    });
+  });
+
   it('marks the disconnected socket offline in every active room', async () => {
     const { gateway, roomEmit } = createGateway();
     gateway.activeRooms = [

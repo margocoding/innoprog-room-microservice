@@ -303,6 +303,17 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.startSnapshotTimer(room.id);
     }
 
+    activeRoom.members = activeRoom.members.filter((member) => {
+      const isPreviousIdentityOnSameSocket =
+        member.clientId === client.id && member.telegramId !== telegramId;
+
+      if (isPreviousIdentityOnSameSocket) {
+        this.forgetSocketMembership(client.id, activeRoom.id);
+      }
+
+      return !isPreviousIdentityOnSameSocket;
+    });
+
     const existingMember = activeRoom?.members.find(
       (member) => member.telegramId === telegramId,
     );

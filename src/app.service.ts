@@ -19,8 +19,7 @@ export class AppService {
             const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
             const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
             return decrypted.toString('utf8')
-        } catch (e) {
-            console.error(e)
+        } catch {
             return undefined;
         }
     }
