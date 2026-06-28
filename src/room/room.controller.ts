@@ -25,19 +25,48 @@ import { RoomRdo } from './rdo/room-rdo';
 import { RoomService } from './room.service';
 import { AuthRoomGuard } from './auth-room.guard';
 import { DeleteRoomDto } from './dto/delete-room-dto';
+import { AppService } from 'src/app.service';
 
 @ApiTags('Room')
 @Controller('room')
 @UsePipes(new ValidationPipe({ whitelist: true }))
 export class RoomController {
-  constructor(private readonly roomService: RoomService) { }
+  constructor(
+    private readonly roomService: RoomService,
+    private readonly appService: AppService,
+  ) { }
 
   @ApiOperation({ summary: 'Create room' })
   @ApiResponse({ status: 200, type: RoomRdo })
   @UseGuards(AuthRoomGuard)
   @Post('/')
   async createRoom(@Body() dto: CreateRoomDto): Promise<RoomRdo> {
-    return await this.roomService.createRoom(dto);
+    const room = await this.roomService.createRoom(dto);
+    return {
+      ...room,
+      roomToken: this.appService.createRoomToken(room.id, room.teacher),
+    };
+  }
+
+  @ApiOperation({ summary: 'Create anonymous signed room token' })
+  @ApiResponse({ status: 200, example: { telegramId: 'i123456', roomToken: 'v1...' } })
+  @ApiNotFoundResponse({
+    example: new NotFoundException('Room not found').getResponse(),
+  })
+  @Post('/:id/token')
+  async createAnonymousRoomToken(
+    @Param('id') id: string,
+  ): Promise<{ telegramId: string; roomToken?: string }> {
+    const room = await this.roomService.getRoom(id);
+    if (!room) {
+      throw new NotFoundException('Room not found');
+    }
+
+    const telegramId = this.appService.createAnonymousRoomUserId();
+    return {
+      telegramId,
+      roomToken: this.appService.createRoomToken(id, telegramId),
+    };
   }
 
   @ApiOperation({ summary: 'Get all rooms by telegram id ' })

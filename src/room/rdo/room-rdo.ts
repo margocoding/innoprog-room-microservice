@@ -10,6 +10,14 @@ export class RoomRdo {
   @Expose()
   public id: string;
 
+  @ApiProperty({
+    title: 'Signed room access token',
+    example: 'v1.payload.signature',
+    required: false,
+  })
+  @Expose()
+  public roomToken?: string;
+
   @ApiProperty({ title: 'Teacher telegram id', example: '54232526524' })
   @Expose()
   public teacher: string;

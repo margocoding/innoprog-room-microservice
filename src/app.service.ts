@@ -1,8 +1,18 @@
 import { Injectable } from "@nestjs/common";
 import * as crypto from 'crypto';
 
+export interface RoomTokenPayload {
+    roomId: string;
+    userId: string;
+    exp: number;
+}
+
 @Injectable()
 export class AppService {
+    private b64urlEncode(data: Buffer | string) {
+        return Buffer.from(data).toString('base64url');
+    }
+
     b64urlDecodeToBuf(s: string) {
         let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
         while (b64.length % 4) b64 += '=';
@@ -19,6 +29,103 @@ export class AppService {
             const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
             const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
             return decrypted.toString('utf8')
+        } catch {
+            return undefined;
+        }
+    }
+
+    private getRoomTokenSecret(): string | undefined {
+        return process.env.ROOM_TOKEN_SECRET || process.env.ENCRYPT_TELEGRAM_ID_KEY;
+    }
+
+    isRoomTokenRequired(): boolean {
+        return String(process.env.REQUIRE_ROOM_TOKEN || '').toLowerCase() === 'true';
+    }
+
+    isLegacyRoomIdAuthAllowed(): boolean {
+        const configured = process.env.ALLOW_LEGACY_ROOM_ID_AUTH;
+        if (configured !== undefined) {
+            return ['1', 'true', 'yes', 'on'].includes(configured.toLowerCase());
+        }
+        return !this.isRoomTokenRequired();
+    }
+
+    createAnonymousRoomUserId(): string {
+        return `i${crypto.randomInt(100000, 999999999)}`;
+    }
+
+    createRoomToken(roomId: string, userId: string, ttlSeconds = 12 * 60 * 60): string | undefined {
+        const secret = this.getRoomTokenSecret();
+        if (!secret) {
+            if (this.isRoomTokenRequired()) {
+                throw new Error('ROOM_TOKEN_SECRET is required when REQUIRE_ROOM_TOKEN=true');
+            }
+            return undefined;
+        }
+
+        const payload = {
+            v: 1,
+            room_id: roomId,
+            user_id: userId,
+            exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+        };
+        const encodedPayload = this.b64urlEncode(
+            JSON.stringify(payload, Object.keys(payload).sort()),
+        );
+        const signature = crypto
+            .createHmac('sha256', secret)
+            .update(encodedPayload)
+            .digest('base64url');
+        return `v1.${encodedPayload}.${signature}`;
+    }
+
+    verifyRoomToken(token: string, expectedRoomId?: string): RoomTokenPayload | undefined {
+        const secret = this.getRoomTokenSecret();
+        if (!secret || !token) {
+            return undefined;
+        }
+
+        try {
+            const [version, encodedPayload, signature] = token.split('.');
+            if (version !== 'v1' || !encodedPayload || !signature) {
+                return undefined;
+            }
+
+            const expectedSignature = crypto
+                .createHmac('sha256', secret)
+                .update(encodedPayload)
+                .digest();
+            const actualSignature = this.b64urlDecodeToBuf(signature);
+            if (
+                actualSignature.length !== expectedSignature.length ||
+                !crypto.timingSafeEqual(actualSignature, expectedSignature)
+            ) {
+                return undefined;
+            }
+
+            const payload = JSON.parse(this.b64urlDecodeToBuf(encodedPayload).toString('utf8'));
+            if (
+                payload?.v !== 1 ||
+                typeof payload.room_id !== 'string' ||
+                typeof payload.user_id !== 'string' ||
+                typeof payload.exp !== 'number'
+            ) {
+                return undefined;
+            }
+
+            if (expectedRoomId && payload.room_id !== expectedRoomId) {
+                return undefined;
+            }
+
+            if (payload.exp <= Math.floor(Date.now() / 1000)) {
+                return undefined;
+            }
+
+            return {
+                roomId: payload.room_id,
+                userId: payload.user_id,
+                exp: payload.exp,
+            };
         } catch {
             return undefined;
         }
