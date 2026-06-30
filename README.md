@@ -31,6 +31,15 @@
 $ yarn install
 ```
 
+## Production configuration
+
+`ROOM_CORS_ALLOWED_ORIGINS` can extend the default Socket.IO browser origin
+allowlist. Keep it comma-separated, for example:
+
+```bash
+ROOM_CORS_ALLOWED_ORIGINS=https://ide.innoprog.ru,https://app.innoprog.ru
+```
+
 ## Compile and run the project
 
 ```bash

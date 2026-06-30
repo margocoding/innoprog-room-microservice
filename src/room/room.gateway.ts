@@ -98,9 +98,46 @@ interface SocketMembership {
   telegramId: string;
 }
 
+const DEFAULT_SOCKET_CORS_ALLOWED_ORIGINS = [
+  'https://ide.innoprog.ru',
+  'https://app.innoprog.ru',
+  'https://api.innoprog.ru',
+  'http://localhost:3000',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+];
+
+function getSocketCorsAllowedOrigins(): Set<string> {
+  const configured = process.env.ROOM_CORS_ALLOWED_ORIGINS ?? '';
+  const extraOrigins = configured
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+
+  return new Set([...DEFAULT_SOCKET_CORS_ALLOWED_ORIGINS, ...extraOrigins]);
+}
+
+const socketCorsAllowedOrigins = getSocketCorsAllowedOrigins();
+
+function isSocketCorsOriginAllowed(origin?: string): boolean {
+  if (!origin) {
+    return true;
+  }
+  return socketCorsAllowedOrigins.has(origin.replace(/\/+$/, ''));
+}
+
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: (origin, callback) => {
+      if (isSocketCorsOriginAllowed(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error('Socket origin is not allowed'), false);
+    },
     methods: ['GET', 'POST'],
     credentials: true,
   },
