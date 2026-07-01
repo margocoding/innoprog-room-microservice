@@ -7,6 +7,8 @@ export interface RoomTokenPayload {
     exp: number;
 }
 
+const DEFAULT_ROOM_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+
 @Injectable()
 export class AppService {
     private b64urlEncode(data: Buffer | string) {
@@ -54,7 +56,21 @@ export class AppService {
         return `i${crypto.randomInt(100000, 999999999)}`;
     }
 
-    createRoomToken(roomId: string, userId: string, ttlSeconds = 12 * 60 * 60): string | undefined {
+    getRoomTokenTtlSeconds(): number {
+        const configured = process.env.ROOM_TOKEN_TTL_SECONDS;
+        if (!configured) {
+            return DEFAULT_ROOM_TOKEN_TTL_SECONDS;
+        }
+
+        const parsed = Number(configured);
+        if (!Number.isFinite(parsed) || parsed < 60) {
+            return DEFAULT_ROOM_TOKEN_TTL_SECONDS;
+        }
+
+        return Math.floor(parsed);
+    }
+
+    createRoomToken(roomId: string, userId: string, ttlSeconds?: number): string | undefined {
         const secret = this.getRoomTokenSecret();
         if (!secret) {
             if (this.isRoomTokenRequired()) {
@@ -62,12 +78,13 @@ export class AppService {
             }
             return undefined;
         }
+        const tokenTtlSeconds = ttlSeconds ?? this.getRoomTokenTtlSeconds();
 
         const payload = {
             v: 1,
             room_id: roomId,
             user_id: userId,
-            exp: Math.floor(Date.now() / 1000) + ttlSeconds,
+            exp: Math.floor(Date.now() / 1000) + tokenTtlSeconds,
         };
         const encodedPayload = this.b64urlEncode(
             JSON.stringify(payload, Object.keys(payload).sort()),
