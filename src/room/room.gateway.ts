@@ -13,7 +13,7 @@ import { EditRoomDto } from './dto/edit-room-dto';
 import { RoomRdo } from './rdo/room-rdo';
 import { RoomService } from './room.service';
 import * as Y from 'yjs';
-import { Logger, UseGuards } from '@nestjs/common';
+import { BeforeApplicationShutdown, Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
 
 interface JoinPayload {
@@ -144,16 +144,23 @@ function isSocketCorsOriginAllowed(origin?: string): boolean {
   pingTimeout: 30000,
 })
 @UseGuards(AuthRoomGuard)
-export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class RoomGateway
+  implements OnGatewayConnection, OnGatewayDisconnect, BeforeApplicationShutdown
+{
   private readonly logger = new Logger(RoomGateway.name);
   private readonly SNAPSHOT_INTERVAL_MS = Number(
-    process.env.ROOM_SNAPSHOT_INTERVAL_MS ?? 30_000,
+    process.env.ROOM_SNAPSHOT_INTERVAL_MS ?? 5_000,
+  );
+  private readonly SNAPSHOT_DEBOUNCE_MS = Number(
+    process.env.ROOM_SNAPSHOT_DEBOUNCE_MS ?? 1_000,
   );
   private docs = new Map<string, Y.Doc>();
   private docInitTasks = new Map<string, Promise<Y.Doc>>();
   private timers = new Map<string, NodeJS.Timeout>();
+  private snapshotDebounceTimers = new Map<string, NodeJS.Timeout>();
   private snapshotDirtyRooms = new Set<string>();
   private snapshotSavingRooms = new Set<string>();
+  private lastPersistedSnapshots = new Map<string, string | null>();
   private socketMemberships = new Map<string, Map<string, SocketMembership>>();
 
   constructor(private readonly roomService: RoomService) {}
@@ -622,7 +629,7 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const doc = await this.getOrCreateDoc(data.roomId);
 
     Y.applyUpdate(doc, data.update);
-    this.snapshotDirtyRooms.add(data.roomId);
+    this.scheduleRoomSnapshot(data.roomId);
 
     client.broadcast.to(activeRoom.id).emit('code-edit-action', {
       telegramId: data.telegramId,
@@ -700,6 +707,21 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     await this.markSocketLeft(client);
   }
 
+  async beforeApplicationShutdown(signal?: string) {
+    const roomIds = [...this.docs.keys()];
+    if (roomIds.length === 0) {
+      return;
+    }
+
+    this.logger.log(
+      `Flushing ${roomIds.length} active IDE room snapshot(s) before shutdown${signal ? ` (${signal})` : ''}`,
+    );
+
+    await Promise.allSettled(
+      roomIds.map((roomId) => this.flushRoomSnapshot(roomId, { force: true })),
+    );
+  }
+
   private startSnapshotTimer(roomId: string): void {
     if (this.timers.has(roomId)) {
       return;
@@ -708,8 +730,26 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const timer = setInterval(() => {
       void this.flushRoomSnapshot(roomId);
     }, this.SNAPSHOT_INTERVAL_MS);
+    timer.unref?.();
 
     this.timers.set(roomId, timer);
+  }
+
+  private scheduleRoomSnapshot(roomId: string): void {
+    this.snapshotDirtyRooms.add(roomId);
+
+    const existingTimer = this.snapshotDebounceTimers.get(roomId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+    }
+
+    const timer = setTimeout(() => {
+      this.snapshotDebounceTimers.delete(roomId);
+      void this.flushRoomSnapshot(roomId);
+    }, this.SNAPSHOT_DEBOUNCE_MS);
+    timer.unref?.();
+
+    this.snapshotDebounceTimers.set(roomId, timer);
   }
 
   private cleanupRoomState(roomId: string): void {
@@ -719,9 +759,16 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.timers.delete(roomId);
     }
 
+    const debounceTimer = this.snapshotDebounceTimers.get(roomId);
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      this.snapshotDebounceTimers.delete(roomId);
+    }
+
     this.snapshotDirtyRooms.delete(roomId);
     this.snapshotSavingRooms.delete(roomId);
     this.docInitTasks.delete(roomId);
+    this.lastPersistedSnapshots.delete(roomId);
 
     const doc = this.docs.get(roomId);
     if (doc) {
@@ -735,8 +782,9 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
     options: { force?: boolean } = {},
   ): Promise<void> {
     const { force = false } = options;
+    const isDirty = this.snapshotDirtyRooms.has(roomId);
 
-    if (!force && !this.snapshotDirtyRooms.has(roomId)) {
+    if (!force && !isDirty) {
       return;
     }
 
@@ -755,7 +803,13 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc)).toString(
         'base64',
       );
+
+      if (!isDirty && this.lastPersistedSnapshots.get(roomId) === snapshot) {
+        return;
+      }
+
       await this.roomService.saveRoomSnapshot(roomId, snapshot);
+      this.lastPersistedSnapshots.set(roomId, snapshot);
       this.snapshotDirtyRooms.delete(roomId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -785,13 +839,17 @@ export class RoomGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (snapshot) {
         try {
           Y.applyUpdate(doc, Buffer.from(snapshot, 'base64'));
+          this.lastPersistedSnapshots.set(roomId, snapshot);
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
           this.logger.warn(
             `Cannot apply saved snapshot for room ${roomId}: ${message}`,
           );
+          this.lastPersistedSnapshots.set(roomId, null);
         }
+      } else {
+        this.lastPersistedSnapshots.set(roomId, null);
       }
 
       this.docs.set(roomId, doc);

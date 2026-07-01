@@ -1,4 +1,5 @@
 import { RoomGateway } from './room.gateway';
+import * as Y from 'yjs';
 
 const createRoom = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -19,6 +20,9 @@ const createClient = (id: string) =>
     join: jest.fn().mockResolvedValue(undefined),
     leave: jest.fn().mockResolvedValue(undefined),
     emit: jest.fn(),
+    broadcast: {
+      to: jest.fn(() => ({ emit: jest.fn() })),
+    },
   }) as any;
 
 const createGateway = (room = createRoom()) => {
@@ -152,5 +156,53 @@ describe('RoomGateway membership sync', () => {
     expect(gateway.activeRooms[0].members[0].online).toBe(false);
     expect(gateway.activeRooms[1].members[0].online).toBe(false);
     expect(memberUpdates(roomEmit)).toHaveLength(2);
+  });
+
+  it('persists code edits shortly after receiving a yjs update', async () => {
+    const { gateway, roomService } = createGateway();
+    const teacher = createClient('socket-teacher');
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1', username: 'Teacher' },
+      teacher,
+    );
+
+    const doc = new Y.Doc();
+    doc.getText('codemirror').insert(0, 'print("saved")');
+    const update = Y.encodeStateAsUpdate(doc);
+
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update,
+    });
+
+    expect(roomService.saveRoomSnapshot).not.toHaveBeenCalled();
+
+    await jest.advanceTimersByTimeAsync(1000);
+
+    expect(roomService.saveRoomSnapshot).toHaveBeenCalledTimes(1);
+    expect(roomService.saveRoomSnapshot).toHaveBeenCalledWith(
+      'room-1',
+      expect.any(String),
+    );
+  });
+
+  it('flushes active room snapshots before application shutdown', async () => {
+    const { gateway, roomService } = createGateway();
+    const teacher = createClient('socket-teacher');
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1', username: 'Teacher' },
+      teacher,
+    );
+
+    await gateway.beforeApplicationShutdown('SIGTERM');
+
+    expect(roomService.saveRoomSnapshot).toHaveBeenCalledTimes(1);
+    expect(roomService.saveRoomSnapshot).toHaveBeenCalledWith(
+      'room-1',
+      expect.any(String),
+    );
   });
 });

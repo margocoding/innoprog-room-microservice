@@ -7,6 +7,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     logger: ['debug', 'log', 'warn', 'error'],
   });
+  app.enableShutdownHooks();
 
   const config = new DocumentBuilder()
     .setTitle('Innoprog room microservice')
