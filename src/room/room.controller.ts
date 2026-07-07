@@ -26,6 +26,7 @@ import { RoomService } from './room.service';
 import { AuthRoomGuard } from './auth-room.guard';
 import { DeleteRoomDto } from './dto/delete-room-dto';
 import { AppService } from 'src/app.service';
+import { CreateAnonymousRoomTokenDto } from './dto/create-anonymous-room-token-dto';
 
 @ApiTags('Room')
 @Controller('room')
@@ -56,13 +57,14 @@ export class RoomController {
   @Post('/:id/token')
   async createAnonymousRoomToken(
     @Param('id') id: string,
+    @Body() dto: CreateAnonymousRoomTokenDto,
   ): Promise<{ telegramId: string; roomToken?: string }> {
     const room = await this.roomService.getRoom(id);
     if (!room) {
       throw new NotFoundException('Room not found');
     }
 
-    const telegramId = this.appService.createAnonymousRoomUserId();
+    const telegramId = dto?.telegramId || this.appService.createAnonymousRoomUserId();
     return {
       telegramId,
       roomToken: this.appService.createRoomToken(id, telegramId),
