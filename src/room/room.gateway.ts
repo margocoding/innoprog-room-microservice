@@ -211,6 +211,29 @@ export class RoomGateway
     }
   }
 
+  private getSocketById(clientId: string): Socket | undefined {
+    return this.server?.sockets?.sockets?.get(clientId) as Socket | undefined;
+  }
+
+  private async disconnectReplacedSocket(clientId: string, roomId: string) {
+    this.forgetSocketMembership(clientId, roomId);
+
+    const socket = this.getSocketById(clientId);
+    if (!socket) {
+      return;
+    }
+
+    socket.emit('room-session-replaced', { roomId });
+
+    try {
+      await socket.leave(roomId);
+    } catch {
+      // Socket.IO can already have removed the socket from all rooms.
+    }
+
+    socket.disconnect(true);
+  }
+
   private async markSocketLeft(
     client: Socket,
     options: { exceptRoomId?: string } = {},
@@ -358,7 +381,32 @@ export class RoomGateway
       return !isPreviousIdentityOnSameSocket;
     });
 
-    const existingMember = activeRoom?.members.find(
+    const sameIdentityMembers = activeRoom.members.filter(
+      (member) => member.telegramId === telegramId,
+    );
+
+    for (const member of sameIdentityMembers) {
+      if (member.clientId !== client.id) {
+        await this.disconnectReplacedSocket(member.clientId, activeRoom.id);
+      }
+    }
+
+    let keptSameIdentity = false;
+    activeRoom.members = activeRoom.members.filter((member) => {
+      if (member.telegramId !== telegramId) {
+        return true;
+      }
+
+      if (!keptSameIdentity) {
+        keptSameIdentity = true;
+        return true;
+      }
+
+      this.forgetSocketMembership(member.clientId, activeRoom.id);
+      return false;
+    });
+
+    const existingMember = activeRoom.members.find(
       (member) => member.telegramId === telegramId,
     );
 

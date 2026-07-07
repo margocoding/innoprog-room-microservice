@@ -19,6 +19,7 @@ const createClient = (id: string) =>
     id,
     join: jest.fn().mockResolvedValue(undefined),
     leave: jest.fn().mockResolvedValue(undefined),
+    disconnect: jest.fn(),
     emit: jest.fn(),
     broadcast: {
       to: jest.fn(() => ({ emit: jest.fn() })),
@@ -39,10 +40,11 @@ const createGateway = (room = createRoom()) => {
 
   const roomEmit = jest.fn();
   const to = jest.fn(() => ({ emit: roomEmit }));
+  const sockets = new Map<string, ReturnType<typeof createClient>>();
   const gateway = new RoomGateway(roomService as any);
-  gateway.server = { to } as any;
+  gateway.server = { to, sockets: { sockets } } as any;
 
-  return { gateway, roomService, roomEmit, to };
+  return { gateway, roomService, roomEmit, to, sockets };
 };
 
 const memberUpdates = (roomEmit: jest.Mock) =>
@@ -103,6 +105,35 @@ describe('RoomGateway membership sync', () => {
     );
     await gateway.handleDisconnect(firstClient);
 
+    expect(gateway.activeRooms[0].members).toHaveLength(1);
+    expect(gateway.activeRooms[0].members[0]).toMatchObject({
+      telegramId: 'teacher-1',
+      clientId: 'socket-new',
+      online: true,
+    });
+  });
+
+  it('disconnects the previous socket when the same member rejoins', async () => {
+    const { gateway, sockets } = createGateway();
+    const firstClient = createClient('socket-old');
+    const secondClient = createClient('socket-new');
+    sockets.set(firstClient.id, firstClient);
+    sockets.set(secondClient.id, secondClient);
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      firstClient,
+    );
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      secondClient,
+    );
+
+    expect(firstClient.emit).toHaveBeenCalledWith('room-session-replaced', {
+      roomId: 'room-1',
+    });
+    expect(firstClient.leave).toHaveBeenCalledWith('room-1');
+    expect(firstClient.disconnect).toHaveBeenCalledWith(true);
     expect(gateway.activeRooms[0].members).toHaveLength(1);
     expect(gateway.activeRooms[0].members[0]).toMatchObject({
       telegramId: 'teacher-1',
