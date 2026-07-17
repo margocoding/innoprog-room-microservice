@@ -36,6 +36,8 @@ const createGateway = (room = createRoom()) => {
     upsertRoomMember: jest.fn().mockResolvedValue(undefined),
     getRoomSnapshot: jest.fn().mockResolvedValue(null),
     saveRoomSnapshot: jest.fn().mockResolvedValue(undefined),
+    editRoom: jest.fn().mockResolvedValue(room),
+    completeRoom: jest.fn().mockResolvedValue({ success: true }),
   };
 
   const roomEmit = jest.fn();
@@ -235,5 +237,199 @@ describe('RoomGateway membership sync', () => {
       'room-1',
       expect.any(String),
     );
+  });
+});
+
+describe('RoomGateway events', () => {
+  it('rejects a missing room and joins a new participant', async () => {
+    const missing = createGateway(null as any);
+    const client = createClient('socket-1');
+    await missing.gateway.handleJoinRoom(
+      { telegramId: 'student', roomId: 'missing' },
+      client,
+    );
+    expect(client.emit).toHaveBeenCalledWith('join-room:error', {
+      message: 'Комната не найдена',
+    });
+
+    const joined = createGateway();
+    await joined.gateway.handleJoinRoom(
+      { telegramId: 'new-student', roomId: 'room-1', username: 'New' },
+      client,
+    );
+    expect(joined.roomService.joinRoom).toHaveBeenCalledWith('room-1', 'new-student');
+    expect(joined.roomService.upsertRoomMember).toHaveBeenCalled();
+  });
+
+  it('edits room permissions only for the active teacher', async () => {
+    const { gateway, roomService, roomEmit } = createGateway();
+    roomService.editRoom.mockResolvedValue(
+      createRoom({ studentCursorEnabled: false }),
+    );
+    const client = createClient('teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      client,
+    );
+    await gateway.handleEditRoom(client, {
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+      studentCursorEnabled: false,
+    } as any);
+    expect(roomService.editRoom).toHaveBeenCalled();
+    expect(roomEmit).toHaveBeenCalledWith(
+      'room-edited',
+      expect.objectContaining({ id: 'room-1' }),
+    );
+
+    roomService.getRoom.mockResolvedValueOnce(createRoom({ teacher: 'other' }));
+    await gateway.handleEditRoom(client, {
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+    } as any);
+    expect(client.emit).toHaveBeenCalledWith('error', {
+      message: 'Комната не найдена',
+    });
+  });
+
+  it('validates and broadcasts cursor updates', () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket');
+    gateway.handleCursor(client, {
+      roomId: 'missing', telegramId: 'student', position: [1, 2], logs: [],
+    });
+    gateway.activeRooms = [{
+      ...createRoom(),
+      members: [{ telegramId: 'student', clientId: 'socket', online: true, userColor: '#fff' }],
+    }] as any;
+    gateway.handleCursor(client, {
+      roomId: 'room-1', telegramId: 'student', position: [1], logs: [],
+    });
+    gateway.handleCursor(client, {
+      roomId: 'room-1', telegramId: 'student', position: [4, 5], logs: [],
+    });
+    expect(client.broadcast.to).toHaveBeenCalledWith('room-1');
+    expect(client.broadcast.to.mock.results.at(-1).value.emit).toHaveBeenCalledWith(
+      'cursor-action',
+      expect.objectContaining({ position: [4, 5], userColor: '#fff' }),
+    );
+  });
+
+  it('tracks caret, range and cleared selections', () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket');
+    const member: any = {
+      telegramId: 'student', clientId: 'socket', online: true, userColor: '#fff',
+    };
+    gateway.activeRooms = [{ ...createRoom(), members: [member] }] as any;
+    gateway.handleSelection(client, {
+      roomId: 'room-1', telegramId: 'student', line: 2, column: 3,
+    });
+    expect(member.lastSelection).toEqual({ line: 2, column: 3 });
+    gateway.handleSelection(client, {
+      roomId: 'room-1',
+      telegramId: 'student',
+      selectionStart: { line: 1, column: 0 },
+      selectionEnd: { line: 2, column: 2 },
+      selectedText: 'abc',
+    });
+    expect(member.lastSelection.selectedText).toBe('abc');
+    gateway.handleSelection(client, {
+      roomId: 'room-1', telegramId: 'student', clearSelection: true,
+    });
+    expect(member.lastSelection).toEqual({});
+  });
+
+  it('enforces code edit permissions and broadcasts accepted updates', async () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket');
+    gateway.activeRooms = [{
+      ...createRoom({ studentEditCodeEnabled: false }),
+      members: [{ telegramId: 'student', clientId: 'socket', online: true }],
+    }] as any;
+    const update = Y.encodeStateAsUpdate(new Y.Doc());
+    await gateway.handleCodeEdit(client, {
+      roomId: 'room-1', telegramId: 'student', update,
+    });
+    expect(client.emit).toHaveBeenCalledWith('error', {
+      message: 'Редактирование кода отключено в этой комнате',
+    });
+    gateway.activeRooms[0].studentEditCodeEnabled = true;
+    await gateway.handleCodeEdit(client, {
+      roomId: 'room-1', telegramId: 'student', update,
+    });
+    expect(client.broadcast.to.mock.results.at(-1).value.emit).toHaveBeenCalledWith(
+      'code-edit-action',
+      expect.objectContaining({ telegramId: 'student', update }),
+    );
+  });
+
+  it('allows a member or teacher to rename a room member', () => {
+    const { gateway, roomService, roomEmit } = createGateway();
+    const client = createClient('socket');
+    gateway.activeRooms = [{
+      ...createRoom(),
+      members: [{ telegramId: 'student', clientId: 'socket', online: true }],
+    }] as any;
+    gateway.handleEditMember(client, {
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+      changeTelegramId: 'student',
+      username: 'Alice',
+    });
+    expect(roomService.upsertRoomMember).toHaveBeenCalledWith(
+      'room-1', 'student', 'Alice',
+    );
+    expect(roomEmit).toHaveBeenCalledWith(
+      'members-updated',
+      expect.objectContaining({ trigger: 'username-update' }),
+    );
+    gateway.handleEditMember(client, {
+      roomId: 'room-1',
+      telegramId: 'stranger',
+      changeTelegramId: 'student',
+    });
+    expect(client.emit).toHaveBeenCalledWith('error', {
+      message: 'Участник не найден в комнате',
+    });
+  });
+
+  it('closes an active teacher session', async () => {
+    const { gateway, roomService, roomEmit } = createGateway();
+    const client = createClient('teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      client,
+    );
+    roomService.completeRoom.mockResolvedValue({ success: true });
+    await gateway.handleCloseSession(client, {
+      telegramId: 'teacher-1', roomId: 'room-1',
+    });
+    expect(roomService.completeRoom).toHaveBeenCalledWith('room-1');
+    expect(gateway.activeRooms).toHaveLength(0);
+    expect(roomEmit).toHaveBeenCalledWith('complete-session', {
+      message: 'Учитель завершил сессию',
+    });
+  });
+
+  it('loads a saved Yjs snapshot and tolerates a damaged one', async () => {
+    const source = new Y.Doc();
+    source.getText('codemirror').insert(0, 'saved');
+    const encoded = Buffer.from(Y.encodeStateAsUpdate(source)).toString('base64');
+    const valid = createGateway();
+    valid.roomService.getRoomSnapshot.mockResolvedValue(encoded);
+    await valid.gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      createClient('valid'),
+    );
+    expect(valid.roomService.getRoomSnapshot).toHaveBeenCalled();
+
+    const invalid = createGateway();
+    invalid.roomService.getRoomSnapshot.mockResolvedValue('not-yjs');
+    await invalid.gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      createClient('invalid'),
+    );
+    expect(invalid.gateway.activeRooms).toHaveLength(1);
   });
 });
