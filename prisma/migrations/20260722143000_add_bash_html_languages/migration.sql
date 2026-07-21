@@ -1,0 +1,2 @@
+ALTER TYPE "Language" ADD VALUE IF NOT EXISTS 'bash';
+ALTER TYPE "Language" ADD VALUE IF NOT EXISTS 'html';

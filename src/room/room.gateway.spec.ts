@@ -92,6 +92,52 @@ describe('RoomGateway membership sync', () => {
     );
   });
 
+  it('keeps teacher privileges when a student opens the room first', async () => {
+    const { gateway, roomService } = createGateway();
+    const student = createClient('socket-student');
+    const teacher = createClient('socket-teacher');
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'student-1', roomId: 'room-1', username: 'Student' },
+      student,
+    );
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1', username: 'Teacher' },
+      teacher,
+    );
+
+    expect(teacher.emit).toHaveBeenCalledWith(
+      'joined',
+      expect.objectContaining({ telegramId: 'teacher-1', isTeacher: true }),
+    );
+
+    await gateway.handleEditRoom(teacher, {
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+      language: 'bash',
+    } as any);
+    expect(roomService.editRoom).toHaveBeenCalledWith(
+      'room-1',
+      expect.objectContaining({ telegramId: 'teacher-1', language: 'bash' }),
+    );
+  });
+
+  it('rejects an empty language before it reaches the database', async () => {
+    const { gateway, roomService } = createGateway();
+    const teacher = createClient('socket-teacher');
+
+    await gateway.handleEditRoom(teacher, {
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+      language: '',
+    } as any);
+
+    expect(roomService.editRoom).not.toHaveBeenCalled();
+    expect(teacher.emit).toHaveBeenCalledWith('edit-room:error', {
+      message: 'Неподдерживаемый язык программирования',
+    });
+  });
+
   it('updates clientId on repeated join by the same member', async () => {
     const { gateway } = createGateway();
     const firstClient = createClient('socket-old');

@@ -15,6 +15,7 @@ import { RoomService } from './room.service';
 import * as Y from 'yjs';
 import { BeforeApplicationShutdown, Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
+import { Language } from '@prisma/client';
 
 interface JoinPayload {
   telegramId: string;
@@ -488,6 +489,16 @@ export class RoomGateway
       return;
     }
     if (room.completed) return;
+
+    if (
+      data.language !== undefined &&
+      !Object.values(Language).includes(data.language as Language)
+    ) {
+      client.emit('edit-room:error', {
+        message: 'Неподдерживаемый язык программирования',
+      });
+      return;
+    }
 
     // Получаем текущую активную комнату для сохранения настроек
     const activeRoom = this.activeRooms.find((r) => r.id === room.id);

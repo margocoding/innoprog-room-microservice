@@ -11,10 +11,12 @@ generator client {
 enum Language {
   js
   py
+  bash
   cpp
   sql
   dart
   java
+  html
 }
 
 model Log {
