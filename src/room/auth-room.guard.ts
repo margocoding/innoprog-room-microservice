@@ -8,32 +8,6 @@ const isRoomGeneratedTelegramId = (telegramId?: string): boolean =>
 const isDecryptedTelegramId = (telegramId?: string): boolean =>
     Boolean(telegramId && /^-?\d+$/.test(telegramId));
 
-const getRefererTelegramId = (client: any): string | undefined => {
-    const referer = client?.handshake?.headers?.referer;
-    if (!referer || typeof referer !== 'string') {
-        return undefined;
-    }
-
-    try {
-        return new URL(referer).searchParams.get('telegramId') ?? undefined;
-    } catch {
-        return undefined;
-    }
-}
-
-const getRefererParam = (client: any, name: string): string | undefined => {
-    const referer = client?.handshake?.headers?.referer;
-    if (!referer || typeof referer !== 'string') {
-        return undefined;
-    }
-
-    try {
-        return new URL(referer).searchParams.get(name) ?? undefined;
-    } catch {
-        return undefined;
-    }
-}
-
 const firstString = (value: unknown): string | undefined => {
     if (Array.isArray(value)) {
         return firstString(value[0]);
@@ -67,16 +41,13 @@ export class AuthRoomGuard implements CanActivate {
     private getRoomTokenFromWs(data: any, client: any): string | undefined {
         return (
             firstString(data?.roomToken) ||
-            firstString(client?.handshake?.query?.roomToken) ||
-            firstString(client?.handshake?.headers?.['x-room-token']) ||
-            getRefererParam(client, 'roomToken')
+            firstString(client?.handshake?.headers?.['x-room-token'])
         );
     }
 
     private getRoomTokenFromHttp(request: Request): string | undefined {
         return (
             firstString(request.headers?.['x-room-token']) ||
-            firstString(request.query?.roomToken) ||
             firstString(request.body?.roomToken)
         );
     }
@@ -157,12 +128,6 @@ export class AuthRoomGuard implements CanActivate {
             }
 
             telegramId = firstString(data.telegramId);
-            const refererTelegramId = getRefererTelegramId(client);
-
-            if (refererTelegramId && (!telegramId || isRoomGeneratedTelegramId(telegramId))) {
-                telegramId = refererTelegramId;
-            }
-
             telegramId = this.normalizeTelegramId(telegramId);
 
             if (!this.isValidTelegramId(telegramId)) {

@@ -7,10 +7,13 @@ export interface RoomTokenPayload {
     exp: number;
 }
 
-const DEFAULT_ROOM_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
+const DEFAULT_ROOM_TOKEN_TTL_SECONDS = 60 * 60;
+const ROOM_LAUNCH_CODE_TTL_SECONDS = 2 * 60;
+const MAX_LAUNCH_CODES = 10_000;
 
 @Injectable()
 export class AppService {
+    private readonly roomLaunchCodes = new Map<string, { roomId: string; userId: string; exp: number }>();
     private b64urlEncode(data: Buffer | string) {
         return Buffer.from(data).toString('base64url');
     }
@@ -54,6 +57,34 @@ export class AppService {
 
     createAnonymousRoomUserId(): string {
         return `i${crypto.randomInt(100000, 999999999)}`;
+    }
+
+    createRoomLaunchCode(roomId: string, userId: string): string {
+        const now = Math.floor(Date.now() / 1000);
+        for (const [code, payload] of this.roomLaunchCodes) {
+            if (payload.exp < now) this.roomLaunchCodes.delete(code);
+        }
+        while (this.roomLaunchCodes.size >= MAX_LAUNCH_CODES) {
+            const oldest = this.roomLaunchCodes.keys().next().value;
+            if (!oldest) break;
+            this.roomLaunchCodes.delete(oldest);
+        }
+        const code = crypto.randomBytes(24).toString('base64url');
+        this.roomLaunchCodes.set(code, {
+            roomId,
+            userId,
+            exp: now + ROOM_LAUNCH_CODE_TTL_SECONDS,
+        });
+        return code;
+    }
+
+    consumeRoomLaunchCode(code: string, expectedRoomId: string): { roomId: string; userId: string } | undefined {
+        const payload = this.roomLaunchCodes.get(code);
+        this.roomLaunchCodes.delete(code);
+        if (!payload || payload.roomId !== expectedRoomId || payload.exp < Math.floor(Date.now() / 1000)) {
+            return undefined;
+        }
+        return { roomId: payload.roomId, userId: payload.userId };
     }
 
     getRoomTokenTtlSeconds(): number {

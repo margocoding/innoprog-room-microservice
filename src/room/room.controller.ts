@@ -27,6 +27,7 @@ import { AuthRoomGuard } from './auth-room.guard';
 import { DeleteRoomDto } from './dto/delete-room-dto';
 import { AppService } from 'src/app.service';
 import { CreateAnonymousRoomTokenDto } from './dto/create-anonymous-room-token-dto';
+import { ExchangeRoomLaunchCodeDto } from './dto/exchange-room-launch-code-dto';
 
 @ApiTags('Room')
 @Controller('room')
@@ -46,7 +47,25 @@ export class RoomController {
     return {
       ...room,
       roomToken: this.appService.createRoomToken(room.id, room.teacher),
+      roomLaunchCode: this.appService.createRoomLaunchCode(room.id, room.teacher),
     };
+  }
+
+  @ApiOperation({ summary: 'Exchange one-time room launch code' })
+  @Post('/:id/launch')
+  async exchangeRoomLaunchCode(
+    @Param('id') id: string,
+    @Body() dto: ExchangeRoomLaunchCodeDto,
+  ): Promise<{ telegramId: string; roomToken: string }> {
+    const launch = this.appService.consumeRoomLaunchCode(dto.launchCode, id);
+    if (!launch) {
+      throw new NotFoundException('Launch code not found or expired');
+    }
+    const roomToken = this.appService.createRoomToken(id, launch.userId);
+    if (!roomToken) {
+      throw new NotFoundException('Room token unavailable');
+    }
+    return { telegramId: launch.userId, roomToken };
   }
 
   @ApiOperation({ summary: 'Create anonymous signed room token' })

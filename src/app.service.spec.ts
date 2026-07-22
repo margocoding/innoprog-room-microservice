@@ -23,7 +23,7 @@ describe('AppService room tokens', () => {
         process.env = originalEnv;
     });
 
-    it('creates room tokens that live for 30 days by default', () => {
+    it('creates room tokens that live for one hour by default', () => {
         delete process.env.ROOM_TOKEN_TTL_SECONDS;
         const service = new AppService();
 
@@ -33,7 +33,7 @@ describe('AppService room tokens', () => {
         expect(decodeRoomToken(token as string)).toMatchObject({
             room_id: 'room-1',
             user_id: '7488194158',
-            exp: Math.floor(fixedNow / 1000) + 30 * 24 * 60 * 60,
+            exp: Math.floor(fixedNow / 1000) + 60 * 60,
         });
     });
 
@@ -57,10 +57,22 @@ describe('AppService room tokens', () => {
         process.env.ALLOW_LEGACY_ROOM_ID_AUTH = 'yes';
         expect(service.isLegacyRoomIdAuthAllowed()).toBe(true);
         process.env.ROOM_TOKEN_TTL_SECONDS = 'invalid';
-        expect(service.getRoomTokenTtlSeconds()).toBe(30 * 24 * 60 * 60);
+        expect(service.getRoomTokenTtlSeconds()).toBe(60 * 60);
         process.env.ROOM_TOKEN_TTL_SECONDS = '59';
-        expect(service.getRoomTokenTtlSeconds()).toBe(30 * 24 * 60 * 60);
+        expect(service.getRoomTokenTtlSeconds()).toBe(60 * 60);
         expect(service.createAnonymousRoomUserId()).toMatch(/^i\d+$/);
+    });
+
+    it('exchanges a short-lived launch code exactly once without putting a room token in a URL', () => {
+        const service = new AppService();
+        const launchCode = service.createRoomLaunchCode('room-1', 'teacher-1');
+
+        expect(launchCode).toMatch(/^[A-Za-z0-9_-]+$/);
+        expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).toEqual({
+            roomId: 'room-1',
+            userId: 'teacher-1',
+        });
+        expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).toBeUndefined();
     });
 
     it('verifies valid tokens and rejects tampering, expiration and room mismatch', () => {

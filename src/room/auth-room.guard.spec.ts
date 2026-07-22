@@ -72,7 +72,7 @@ describe('AuthRoomGuard', () => {
     expect(appService.decryptTelegramId).toHaveBeenCalledWith('encrypted-token');
   });
 
-  it('uses encrypted referer id over a generated websocket id', async () => {
+  it('ignores identity from referer and keeps the explicit websocket identity', async () => {
     const appService = createAppServiceMock({
       decryptTelegramId: jest.fn(() => '429272623'),
     });
@@ -87,8 +87,8 @@ describe('AuthRoomGuard', () => {
     );
 
     expect(result).toBe(true);
-    expect(data.telegramId).toBe('429272623');
-    expect(appService.decryptTelegramId).toHaveBeenCalledWith('encrypted-token');
+    expect(data.telegramId).toBe('i123456');
+    expect(appService.decryptTelegramId).not.toHaveBeenCalled();
   });
 
   it('accepts already decrypted numeric ids for http requests', async () => {
@@ -148,6 +148,45 @@ describe('AuthRoomGuard', () => {
       roomId: 'room-1',
       userId: '-1001234567890',
     });
+  });
+
+  it('does not accept room tokens from websocket referer or handshake query', async () => {
+    const appService = createAppServiceMock({
+      isRoomTokenRequired: jest.fn(() => true),
+      verifyRoomToken: jest.fn(() => ({ roomId: 'room-1', userId: 'teacher-1', exp: 9999999999 })),
+    });
+    const guard = new AuthRoomGuard(appService as any);
+    const emit = jest.fn();
+    const data = { roomId: 'room-1' };
+
+    const result = await guard.canActivate(createWsContext(
+      data,
+      { referer: 'https://ide.innoprog.ru/?roomId=room-1&roomToken=secret' },
+      { emit, handshake: { query: { roomToken: 'secret' }, headers: {} } },
+    ));
+
+    expect(result).toBe(false);
+    expect(appService.verifyRoomToken).not.toHaveBeenCalled();
+  });
+
+  it('does not accept room tokens from HTTP query parameters', async () => {
+    const appService = createAppServiceMock({
+      isRoomTokenRequired: jest.fn(() => true),
+      verifyRoomToken: jest.fn(() => ({ roomId: 'room-1', userId: 'teacher-1', exp: 9999999999 })),
+    });
+    const guard = new AuthRoomGuard(appService as any);
+    const request = {
+      query: { roomToken: 'secret' },
+      params: { id: 'room-1' },
+      body: {},
+      headers: {},
+      res: { status: jest.fn(() => ({ json: jest.fn() })) },
+    };
+
+    const result = await guard.canActivate(createHttpContext(request));
+
+    expect(result).toBe(false);
+    expect(appService.verifyRoomToken).not.toHaveBeenCalled();
   });
 
   it('allows subsequent websocket events only for the verified socket identity', async () => {

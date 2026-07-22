@@ -18,6 +18,13 @@ export class RoomRdo {
   @Expose()
   public roomToken?: string;
 
+  @ApiProperty({
+    title: 'One-time launch code for opening the teacher room',
+    required: false,
+  })
+  @Expose()
+  public roomLaunchCode?: string;
+
   @ApiProperty({ title: 'Teacher telegram id', example: '54232526524' })
   @Expose()
   public teacher: string;
