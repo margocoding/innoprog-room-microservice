@@ -63,6 +63,35 @@ describe('RoomService', () => {
     expect(result.id).toBe('room-1');
   });
 
+  it('persists the teacher display name when the room is created', async () => {
+    prisma.room.create.mockResolvedValue(room());
+    prisma.roomMember.upsert.mockResolvedValue({
+      roomId: 'room-1',
+      telegramId: 'teacher-1',
+      username: 'Артемий Королёв',
+    });
+
+    await service.createRoom({
+      telegramId: 'teacher-1',
+      username: '  Артемий Королёв  ',
+    } as any);
+
+    expect(prisma.roomMember.upsert).toHaveBeenCalledWith({
+      where: {
+        telegramId_roomId: {
+          telegramId: 'teacher-1',
+          roomId: 'room-1',
+        },
+      },
+      create: {
+        roomId: 'room-1',
+        telegramId: 'teacher-1',
+        username: 'Артемий Королёв',
+      },
+      update: { username: 'Артемий Королёв' },
+    });
+  });
+
   it('edits supplied fields and preserves omitted permissions', async () => {
     prisma.room.findUnique.mockResolvedValue(room());
     prisma.room.update.mockResolvedValue(room({ language: 'javascript' }));
@@ -186,8 +215,13 @@ describe('RoomService', () => {
   });
 
   it('upserts room member metadata with and without username', async () => {
-    await service.upsertRoomMember('room-1', 'student-1', 'Alice');
-    await service.upsertRoomMember('room-1', 'student-2');
+    prisma.roomMember.upsert
+      .mockResolvedValueOnce({ username: 'Alice' })
+      .mockResolvedValueOnce({ username: 'Saved name' });
+    await expect(service.upsertRoomMember('room-1', 'student-1', 'Alice'))
+      .resolves.toEqual({ username: 'Alice' });
+    await expect(service.upsertRoomMember('room-1', 'student-2'))
+      .resolves.toEqual({ username: 'Saved name' });
     expect(prisma.roomMember.upsert.mock.calls[0][0]).toMatchObject({
       create: { roomId: 'room-1', telegramId: 'student-1', username: 'Alice' },
       update: { username: 'Alice' },

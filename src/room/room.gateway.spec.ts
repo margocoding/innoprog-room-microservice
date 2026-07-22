@@ -122,6 +122,29 @@ describe('RoomGateway membership sync', () => {
     );
   });
 
+  it('restores the persisted teacher name on the first signed join', async () => {
+    const { gateway, roomService } = createGateway();
+    const teacher = createClient('socket-teacher');
+    roomService.upsertRoomMember.mockResolvedValue({
+      telegramId: 'teacher-1',
+      username: 'Артемий Королёв',
+    });
+
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      teacher,
+    );
+
+    expect(teacher.emit).toHaveBeenCalledWith(
+      'joined',
+      expect.objectContaining({
+        telegramId: 'teacher-1',
+        username: 'Артемий Королёв',
+        isTeacher: true,
+      }),
+    );
+  });
+
   it('rejects an empty language before it reaches the database', async () => {
     const { gateway, roomService } = createGateway();
     const teacher = createClient('socket-teacher');

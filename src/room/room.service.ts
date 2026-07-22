@@ -23,6 +23,11 @@ export class RoomService {
       },
     });
 
+    const teacherUsername = dto.username?.trim();
+    if (teacherUsername) {
+      await this.upsertRoomMember(room.id, room.teacher, teacherUsername);
+    }
+
     return fillDto(RoomRdo, room);
   }
 
@@ -207,7 +212,7 @@ export class RoomService {
   }
 
   async upsertRoomMember(roomId: string, telegramId: string, username?: string) {
-    await this.prisma.roomMember.upsert({
+    return await this.prisma.roomMember.upsert({
       where: {
         telegramId_roomId: {
           telegramId,

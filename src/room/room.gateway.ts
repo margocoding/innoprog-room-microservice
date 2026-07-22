@@ -350,7 +350,12 @@ export class RoomGateway
       room = await this.roomService.joinRoom(room.id, telegramId);
     }
 
-    await this.roomService.upsertRoomMember(room.id, telegramId, username);
+    const persistedMember = await this.roomService.upsertRoomMember(
+      room.id,
+      telegramId,
+      username,
+    );
+    const effectiveUsername = username || persistedMember?.username || undefined;
 
     await this.markSocketLeft(client, { exceptRoomId: room.id });
     await client.join(room.id);
@@ -415,14 +420,14 @@ export class RoomGateway
       existingMember.online = true;
       existingMember.clientId = client.id;
       existingMember.lastActivity = new Date();
-      if (username) {
-        existingMember.username = username;
+      if (effectiveUsername) {
+        existingMember.username = effectiveUsername;
       }
     } else {
       activeRoom?.members.push({
         clientId: client.id,
         telegramId,
-        username,
+        username: effectiveUsername,
         online: true,
         userColor: this.generateUserColor(telegramId),
         lastActivity: new Date(),
@@ -452,6 +457,7 @@ export class RoomGateway
 
     client.emit('joined', {
       telegramId,
+      username: effectiveUsername,
       currentCursors,
       currentSelections,
       userColor:
