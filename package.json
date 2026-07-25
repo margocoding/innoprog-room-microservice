@@ -14,10 +14,13 @@
     "start:prod": "node dist/src/main",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "test": "jest",
+    "test:unit": "jest --runInBand",
+    "test:contracts": "jest src/room/auth-room.guard.spec.ts src/room/language.contract.spec.ts --runInBand",
+    "test:integration": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage --runInBand",
-    "test:coverage": "jest --coverage --runInBand",
-    "test:ci": "jest --coverage --runInBand --ci",
+    "test:coverage": "jest --coverage --runInBand && node scripts/write-coverage-metadata.mjs",
+    "test:ci": "npm run test:coverage -- --ci && npm run build",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
@@ -86,9 +89,12 @@
     "coverageThreshold": {
       "global": {
         "statements": 80,
-        "lines": 80
+        "lines": 80,
+        "functions": 86,
+        "branches": 72
       }
     },
+    "coverageReporters": ["text", "html", "lcov", "json-summary"],
     "testEnvironment": "node"
   }
 }
