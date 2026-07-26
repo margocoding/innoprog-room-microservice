@@ -75,7 +75,7 @@ describe('RoomController', () => {
   it('exchanges a one-time launch code for an in-memory room token', async () => {
     const result = await controller.exchangeRoomLaunchCode('room-1', {
       launchCode: 'one-time-launch-code-123456',
-    }, response as any);
+    }, { headers: {} } as any, response as any);
 
     expect(result).toEqual({ telegramId: 'teacher-1', roomToken: 'token-room-1-teacher-1' });
     expect(appService.consumeRoomLaunchCode).toHaveBeenCalledWith(
@@ -91,6 +91,49 @@ describe('RoomController', () => {
         sameSite: 'lax',
       }),
     );
+  });
+
+  it('recovers the teacher identity from the room cookie when a consumed launch response is retried', async () => {
+    appService.consumeRoomLaunchCode.mockResolvedValue(undefined);
+    appService.verifyRoomBrowserSession.mockReturnValue({
+      roomId: 'room-1',
+      userId: 'teacher-1',
+    });
+
+    const result = await controller.exchangeRoomLaunchCode(
+      'room-1',
+      { launchCode: 'already-consumed-code' },
+      { headers: { cookie: 'ide_room_session_hash=signed-browser-session' } } as any,
+      response as any,
+    );
+
+    expect(appService.verifyRoomBrowserSession).toHaveBeenCalledWith(
+      'signed-browser-session',
+      'room-1',
+    );
+    expect(result).toEqual({
+      telegramId: 'teacher-1',
+      roomToken: 'token-room-1-teacher-1',
+    });
+  });
+
+  it('never upgrades an anonymous room cookie when a teacher launch code is missing', async () => {
+    appService.consumeRoomLaunchCode.mockResolvedValue(undefined);
+    appService.verifyRoomBrowserSession.mockReturnValue({
+      roomId: 'room-1',
+      userId: 'i123456',
+    });
+
+    await expect(
+      controller.exchangeRoomLaunchCode(
+        'room-1',
+        { launchCode: 'missing-code' },
+        { headers: { cookie: 'ide_room_session_hash=anonymous-session' } } as any,
+        response as any,
+      ),
+    ).rejects.toMatchObject({ status: 404 });
+
+    expect(appService.createRoomToken).not.toHaveBeenCalled();
   });
 
   it('reuses a saved anonymous room user id when issuing a new token', async () => {

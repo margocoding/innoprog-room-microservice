@@ -71,9 +71,21 @@ export class RoomController {
   async exchangeRoomLaunchCode(
     @Param('id') id: string,
     @Body() dto: ExchangeRoomLaunchCodeDto,
+    @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ): Promise<{ telegramId: string; roomToken: string }> {
-    const launch = await this.appService.consumeRoomLaunchCode(dto.launchCode, id);
+    let launch = await this.appService.consumeRoomLaunchCode(dto.launchCode, id);
+    if (!launch) {
+      const cookieName = this.appService.getRoomSessionCookieName(id);
+      const cookieToken = this.readCookie(request.headers.cookie, cookieName);
+      const existing = cookieToken
+        ? this.appService.verifyRoomBrowserSession(cookieToken, id)
+        : undefined;
+      const room = existing ? await this.roomService.getRoom(id) : undefined;
+      if (existing && room?.teacher === existing.userId) {
+        launch = { roomId: id, userId: existing.userId };
+      }
+    }
     if (!launch) {
       throw new NotFoundException('Launch code not found or expired');
     }
