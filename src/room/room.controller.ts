@@ -8,6 +8,8 @@ import {
   Post,
   Put,
   Query,
+  Req,
+  Res,
   UseGuards,
   UsePipes,
   ValidationPipe,
@@ -18,6 +20,7 @@ import {
   ApiResponse,
   ApiTags,
 } from '@nestjs/swagger';
+import { Request, Response } from 'express';
 import { CreateRoomDto } from './dto/create-room-dto';
 import { EditRoomDto } from './dto/edit-room-dto';
 import { GetRoomsDto } from './dto/get-rooms-dto';
@@ -47,7 +50,7 @@ export class RoomController {
     return {
       ...room,
       roomToken: this.appService.createRoomToken(room.id, room.teacher),
-      roomLaunchCode: this.appService.createRoomLaunchCode(room.id, room.teacher),
+      roomLaunchCode: await this.appService.createRoomLaunchCode(room.id, room.teacher),
     };
   }
 
@@ -56,8 +59,9 @@ export class RoomController {
   async exchangeRoomLaunchCode(
     @Param('id') id: string,
     @Body() dto: ExchangeRoomLaunchCodeDto,
+    @Res({ passthrough: true }) response: Response,
   ): Promise<{ telegramId: string; roomToken: string }> {
-    const launch = this.appService.consumeRoomLaunchCode(dto.launchCode, id);
+    const launch = await this.appService.consumeRoomLaunchCode(dto.launchCode, id);
     if (!launch) {
       throw new NotFoundException('Launch code not found or expired');
     }
@@ -65,6 +69,7 @@ export class RoomController {
     if (!roomToken) {
       throw new NotFoundException('Room token unavailable');
     }
+    this.setRoomSessionCookie(response, id, launch.userId);
     return { telegramId: launch.userId, roomToken };
   }
 
@@ -77,17 +82,59 @@ export class RoomController {
   async createAnonymousRoomToken(
     @Param('id') id: string,
     @Body() dto: CreateAnonymousRoomTokenDto,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
   ): Promise<{ telegramId: string; roomToken?: string }> {
     const room = await this.roomService.getRoom(id);
     if (!room) {
       throw new NotFoundException('Room not found');
     }
 
-    const telegramId = dto?.telegramId || this.appService.createAnonymousRoomUserId();
+    const cookieName = this.appService.getRoomSessionCookieName(id);
+    const cookieToken = this.readCookie(request.headers.cookie, cookieName);
+    const existing = cookieToken
+      ? this.appService.verifyRoomBrowserSession(cookieToken, id)
+      : undefined;
+    const telegramId = existing?.userId
+      || dto?.telegramId
+      || this.appService.createAnonymousRoomUserId();
+    this.setRoomSessionCookie(response, id, telegramId);
     return {
       telegramId,
       roomToken: this.appService.createRoomToken(id, telegramId),
     };
+  }
+
+  private readCookie(header: string | undefined, name: string): string {
+    for (const part of String(header || '').split(';')) {
+      const [rawName, ...rawValue] = part.trim().split('=');
+      if (rawName === name) {
+        return decodeURIComponent(rawValue.join('='));
+      }
+    }
+    return '';
+  }
+
+  private setRoomSessionCookie(
+    response: Response,
+    roomId: string,
+    userId: string,
+  ): void {
+    const session = this.appService.createRoomBrowserSession(roomId, userId);
+    if (!session) {
+      return;
+    }
+    response.cookie(
+      this.appService.getRoomSessionCookieName(roomId),
+      session,
+      {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 365 * 24 * 60 * 60 * 1000,
+      },
+    );
   }
 
   @ApiOperation({ summary: 'Get all rooms by telegram id ' })

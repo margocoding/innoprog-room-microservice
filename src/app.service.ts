@@ -1,5 +1,6 @@
 import { Injectable } from "@nestjs/common";
 import * as crypto from 'crypto';
+import { RoomLaunchCodeStore } from './room-launch-code.store';
 
 export interface RoomTokenPayload {
     roomId: string;
@@ -8,12 +9,14 @@ export interface RoomTokenPayload {
 }
 
 const DEFAULT_ROOM_TOKEN_TTL_SECONDS = 60 * 60;
-const ROOM_LAUNCH_CODE_TTL_SECONDS = 2 * 60;
-const MAX_LAUNCH_CODES = 10_000;
+const ROOM_BROWSER_SESSION_TTL_SECONDS = 365 * 24 * 60 * 60;
 
 @Injectable()
 export class AppService {
-    private readonly roomLaunchCodes = new Map<string, { roomId: string; userId: string; exp: number }>();
+    constructor(
+        private readonly roomLaunchCodeStore: RoomLaunchCodeStore = new RoomLaunchCodeStore(),
+    ) {}
+
     private b64urlEncode(data: Buffer | string) {
         return Buffer.from(data).toString('base64url');
     }
@@ -59,32 +62,15 @@ export class AppService {
         return `i${crypto.randomInt(100000, 999999999)}`;
     }
 
-    createRoomLaunchCode(roomId: string, userId: string): string {
-        const now = Math.floor(Date.now() / 1000);
-        for (const [code, payload] of this.roomLaunchCodes) {
-            if (payload.exp < now) this.roomLaunchCodes.delete(code);
-        }
-        while (this.roomLaunchCodes.size >= MAX_LAUNCH_CODES) {
-            const oldest = this.roomLaunchCodes.keys().next().value;
-            if (!oldest) break;
-            this.roomLaunchCodes.delete(oldest);
-        }
-        const code = crypto.randomBytes(24).toString('base64url');
-        this.roomLaunchCodes.set(code, {
-            roomId,
-            userId,
-            exp: now + ROOM_LAUNCH_CODE_TTL_SECONDS,
-        });
-        return code;
+    createRoomLaunchCode(roomId: string, userId: string): Promise<string> {
+        return this.roomLaunchCodeStore.create({ roomId, userId });
     }
 
-    consumeRoomLaunchCode(code: string, expectedRoomId: string): { roomId: string; userId: string } | undefined {
-        const payload = this.roomLaunchCodes.get(code);
-        this.roomLaunchCodes.delete(code);
-        if (!payload || payload.roomId !== expectedRoomId || payload.exp < Math.floor(Date.now() / 1000)) {
-            return undefined;
-        }
-        return { roomId: payload.roomId, userId: payload.userId };
+    consumeRoomLaunchCode(
+        code: string,
+        expectedRoomId: string,
+    ): Promise<{ roomId: string; userId: string } | undefined> {
+        return this.roomLaunchCodeStore.consume(code, expectedRoomId);
     }
 
     getRoomTokenTtlSeconds(): number {
@@ -125,6 +111,85 @@ export class AppService {
             .update(encodedPayload)
             .digest('base64url');
         return `v1.${encodedPayload}.${signature}`;
+    }
+
+    getRoomSessionCookieName(roomId: string): string {
+        const suffix = crypto
+            .createHash('sha256')
+            .update(String(roomId))
+            .digest('hex')
+            .slice(0, 20);
+        return `ide_room_session_${suffix}`;
+    }
+
+    createRoomBrowserSession(roomId: string, userId: string): string | undefined {
+        const secret = this.getRoomTokenSecret();
+        if (!secret) {
+            if (this.isRoomTokenRequired()) {
+                throw new Error('ROOM_TOKEN_SECRET is required when REQUIRE_ROOM_TOKEN=true');
+            }
+            return undefined;
+        }
+        const payload = {
+            v: 2,
+            room_id: roomId,
+            user_id: userId,
+            exp: Math.floor(Date.now() / 1000) + ROOM_BROWSER_SESSION_TTL_SECONDS,
+        };
+        const encodedPayload = this.b64urlEncode(
+            JSON.stringify(payload, Object.keys(payload).sort()),
+        );
+        const signature = crypto
+            .createHmac('sha256', secret)
+            .update(encodedPayload)
+            .digest('base64url');
+        return `v2.${encodedPayload}.${signature}`;
+    }
+
+    verifyRoomBrowserSession(
+        token: string,
+        expectedRoomId: string,
+    ): RoomTokenPayload | undefined {
+        const secret = this.getRoomTokenSecret();
+        if (!secret || !token) {
+            return undefined;
+        }
+        try {
+            const [version, encodedPayload, signature] = token.split('.');
+            if (version !== 'v2' || !encodedPayload || !signature) {
+                return undefined;
+            }
+            const expectedSignature = crypto
+                .createHmac('sha256', secret)
+                .update(encodedPayload)
+                .digest();
+            const actualSignature = this.b64urlDecodeToBuf(signature);
+            if (
+                actualSignature.length !== expectedSignature.length ||
+                !crypto.timingSafeEqual(actualSignature, expectedSignature)
+            ) {
+                return undefined;
+            }
+            const payload = JSON.parse(
+                this.b64urlDecodeToBuf(encodedPayload).toString('utf8'),
+            );
+            if (
+                payload?.v !== 2 ||
+                payload.room_id !== expectedRoomId ||
+                typeof payload.user_id !== 'string' ||
+                typeof payload.exp !== 'number' ||
+                payload.exp <= Math.floor(Date.now() / 1000)
+            ) {
+                return undefined;
+            }
+            return {
+                roomId: payload.room_id,
+                userId: payload.user_id,
+                exp: payload.exp,
+            };
+        } catch {
+            return undefined;
+        }
     }
 
     verifyRoomToken(token: string, expectedRoomId?: string): RoomTokenPayload | undefined {

@@ -63,16 +63,26 @@ describe('AppService room tokens', () => {
         expect(service.createAnonymousRoomUserId()).toMatch(/^i\d+$/);
     });
 
-    it('exchanges a short-lived launch code exactly once without putting a room token in a URL', () => {
-        const service = new AppService();
-        const launchCode = service.createRoomLaunchCode('room-1', 'teacher-1');
+    it('exchanges a Redis-backed short-lived launch code exactly once without putting a room token in a URL', async () => {
+        const launchCodeStore = {
+            create: jest.fn().mockResolvedValue('one-time-launch-code'),
+            consume: jest.fn()
+                .mockResolvedValueOnce({ roomId: 'room-1', userId: 'teacher-1' })
+                .mockResolvedValueOnce(undefined),
+        };
+        const service = new AppService(launchCodeStore as any);
+        const launchCode = await service.createRoomLaunchCode('room-1', 'teacher-1');
 
         expect(launchCode).toMatch(/^[A-Za-z0-9_-]+$/);
-        expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).toEqual({
+        await expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).resolves.toEqual({
             roomId: 'room-1',
             userId: 'teacher-1',
         });
-        expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).toBeUndefined();
+        await expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).resolves.toBeUndefined();
+        expect(launchCodeStore.create).toHaveBeenCalledWith({
+            roomId: 'room-1',
+            userId: 'teacher-1',
+        });
     });
 
     it('verifies valid tokens and rejects tampering, expiration and room mismatch', () => {
@@ -89,6 +99,29 @@ describe('AppService room tokens', () => {
         delete process.env.ROOM_TOKEN_SECRET;
         delete process.env.ENCRYPT_TELEGRAM_ID_KEY;
         expect(service.verifyRoomToken(token)).toBeUndefined();
+    });
+
+    it('creates a year-long browser session that cannot be used as a websocket token', () => {
+        const service = new AppService();
+        const browserSession = service.createRoomBrowserSession(
+            'room-1',
+            'teacher-1',
+        ) as string;
+
+        expect(browserSession).toBeDefined();
+        expect(service.getRoomSessionCookieName('room-1')).toMatch(
+            /^ide_room_session_[a-f0-9]{20}$/,
+        );
+        expect(
+            service.verifyRoomBrowserSession(browserSession, 'room-1'),
+        ).toMatchObject({
+            roomId: 'room-1',
+            userId: 'teacher-1',
+        });
+        expect(
+            service.verifyRoomBrowserSession(browserSession, 'room-2'),
+        ).toBeUndefined();
+        expect(service.verifyRoomToken(browserSession, 'room-1')).toBeUndefined();
     });
 
     it('returns no token without a secret unless tokens are required', () => {

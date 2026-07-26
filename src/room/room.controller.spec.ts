@@ -11,7 +11,11 @@ describe('RoomController', () => {
     createRoomToken: jest.Mock;
     createRoomLaunchCode: jest.Mock;
     consumeRoomLaunchCode: jest.Mock;
+    createRoomBrowserSession: jest.Mock;
+    getRoomSessionCookieName: jest.Mock;
+    verifyRoomBrowserSession: jest.Mock;
   };
+  let response: { cookie: jest.Mock };
 
   beforeEach(async () => {
     roomService = {
@@ -23,9 +27,13 @@ describe('RoomController', () => {
       createRoomToken: jest.fn((roomId: string, telegramId: string) => {
         return `token-${roomId}-${telegramId}`;
       }),
-      createRoomLaunchCode: jest.fn(() => 'one-time-launch-code-123456'),
-      consumeRoomLaunchCode: jest.fn(() => ({ roomId: 'room-1', userId: 'teacher-1' })),
+      createRoomLaunchCode: jest.fn().mockResolvedValue('one-time-launch-code-123456'),
+      consumeRoomLaunchCode: jest.fn().mockResolvedValue({ roomId: 'room-1', userId: 'teacher-1' }),
+      createRoomBrowserSession: jest.fn(() => 'browser-session-token'),
+      getRoomSessionCookieName: jest.fn(() => 'ide_room_session_hash'),
+      verifyRoomBrowserSession: jest.fn(),
     };
+    response = { cookie: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [RoomController],
@@ -58,19 +66,28 @@ describe('RoomController', () => {
   it('exchanges a one-time launch code for an in-memory room token', async () => {
     const result = await controller.exchangeRoomLaunchCode('room-1', {
       launchCode: 'one-time-launch-code-123456',
-    });
+    }, response as any);
 
     expect(result).toEqual({ telegramId: 'teacher-1', roomToken: 'token-room-1-teacher-1' });
     expect(appService.consumeRoomLaunchCode).toHaveBeenCalledWith(
       'one-time-launch-code-123456',
       'room-1',
     );
+    expect(response.cookie).toHaveBeenCalledWith(
+      'ide_room_session_hash',
+      'browser-session-token',
+      expect.objectContaining({
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+      }),
+    );
   });
 
   it('reuses a saved anonymous room user id when issuing a new token', async () => {
     const result = await controller.createAnonymousRoomToken('room-1', {
       telegramId: 'i123456',
-    });
+    }, { headers: {} } as any, response as any);
 
     expect(result).toEqual({
       telegramId: 'i123456',
@@ -81,7 +98,12 @@ describe('RoomController', () => {
   });
 
   it('creates an anonymous room user id when the client has no saved id', async () => {
-    const result = await controller.createAnonymousRoomToken('room-1', {});
+    const result = await controller.createAnonymousRoomToken(
+      'room-1',
+      {},
+      { headers: {} } as any,
+      response as any,
+    );
 
     expect(result).toEqual({
       telegramId: 'i999999',
@@ -89,5 +111,30 @@ describe('RoomController', () => {
     });
     expect(appService.createAnonymousRoomUserId).toHaveBeenCalledTimes(1);
     expect(appService.createRoomToken).toHaveBeenCalledWith('room-1', 'i999999');
+  });
+
+  it('restores the teacher identity from the protected room cookie', async () => {
+    appService.verifyRoomBrowserSession.mockReturnValue({
+      roomId: 'room-1',
+      userId: 'teacher-1',
+      exp: 9999999999,
+    });
+
+    const result = await controller.createAnonymousRoomToken(
+      'room-1',
+      {},
+      { headers: { cookie: 'ide_room_session_hash=browser-session-token' } } as any,
+      response as any,
+    );
+
+    expect(result).toEqual({
+      telegramId: 'teacher-1',
+      roomToken: 'token-room-1-teacher-1',
+    });
+    expect(appService.verifyRoomBrowserSession).toHaveBeenCalledWith(
+      'browser-session-token',
+      'room-1',
+    );
+    expect(appService.createAnonymousRoomUserId).not.toHaveBeenCalled();
   });
 });
