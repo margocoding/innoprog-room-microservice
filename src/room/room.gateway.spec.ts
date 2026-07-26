@@ -213,6 +213,37 @@ describe('RoomGateway membership sync', () => {
     });
   });
 
+  it('silently replaces a stale socket from the same browser instance', async () => {
+    const { gateway, sockets } = createGateway();
+    const firstClient = createClient('socket-old');
+    const secondClient = createClient('socket-new');
+    sockets.set(firstClient.id, firstClient);
+    sockets.set(secondClient.id, secondClient);
+
+    await gateway.handleJoinRoom(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'same-browser-instance',
+      } as any,
+      firstClient,
+    );
+    await gateway.handleJoinRoom(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'same-browser-instance',
+      } as any,
+      secondClient,
+    );
+
+    expect(firstClient.emit).not.toHaveBeenCalledWith(
+      'room-session-replaced',
+      expect.anything(),
+    );
+    expect(firstClient.disconnect).toHaveBeenCalledWith(true);
+  });
+
   it('replaces a previous identity on the same socket in one room', async () => {
     const { gateway } = createGateway();
     const client = createClient('socket-1');

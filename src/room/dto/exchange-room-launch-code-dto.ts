@@ -6,4 +6,10 @@ export class ExchangeRoomLaunchCodeDto {
   @MaxLength(128)
   @Matches(/^[A-Za-z0-9_-]+$/)
   launchCode: string;
+
+  @IsString()
+  @MinLength(16)
+  @MaxLength(128)
+  @Matches(/^[A-Za-z0-9_-]+$/)
+  browserNonce: string;
 }

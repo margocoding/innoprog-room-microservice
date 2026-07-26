@@ -69,8 +69,9 @@ export class AppService {
     consumeRoomLaunchCode(
         code: string,
         expectedRoomId: string,
+        browserNonce: string,
     ): Promise<{ roomId: string; userId: string } | undefined> {
-        return this.roomLaunchCodeStore.consume(code, expectedRoomId);
+        return this.roomLaunchCodeStore.consume(code, expectedRoomId, browserNonce);
     }
 
     getRoomTokenTtlSeconds(): number {

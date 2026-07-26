@@ -74,11 +74,23 @@ describe('AppService room tokens', () => {
         const launchCode = await service.createRoomLaunchCode('room-1', 'teacher-1');
 
         expect(launchCode).toMatch(/^[A-Za-z0-9_-]+$/);
-        await expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).resolves.toEqual({
+        await expect(
+            service.consumeRoomLaunchCode(
+                launchCode,
+                'room-1',
+                'browser-nonce-123456',
+            ),
+        ).resolves.toEqual({
             roomId: 'room-1',
             userId: 'teacher-1',
         });
-        await expect(service.consumeRoomLaunchCode(launchCode, 'room-1')).resolves.toBeUndefined();
+        await expect(
+            service.consumeRoomLaunchCode(
+                launchCode,
+                'room-1',
+                'different-browser-nonce',
+            ),
+        ).resolves.toBeUndefined();
         expect(launchCodeStore.create).toHaveBeenCalledWith({
             roomId: 'room-1',
             userId: 'teacher-1',

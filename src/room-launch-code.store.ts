@@ -3,8 +3,26 @@ import { createClient, RedisClientType } from 'redis';
 import * as crypto from 'crypto';
 
 const ROOM_LAUNCH_CODE_TTL_SECONDS = 60;
+const ROOM_LAUNCH_REDEMPTION_TTL_SECONDS = 120;
 const ROOM_LAUNCH_KEY_PREFIX = 'innoprog:ide-room:launch:';
 const CREATE_ATTEMPTS = 5;
+const REDEEM_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return nil end
+local ok, payload = pcall(cjson.decode, raw)
+if not ok or payload.roomId ~= ARGV[1] then return nil end
+if payload.status == 'pending' then
+  payload.status = 'redeemed'
+  payload.browserNonce = ARGV[2]
+  redis.call('SET', KEYS[1], cjson.encode(payload), 'EX', ARGV[3])
+  return cjson.encode({ roomId = payload.roomId, userId = payload.userId })
+end
+if payload.status == 'redeemed' and payload.browserNonce == ARGV[2] then
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+  return cjson.encode({ roomId = payload.roomId, userId = payload.userId })
+end
+return nil
+`;
 
 export interface RoomLaunchPayload {
   roomId: string;
@@ -54,7 +72,7 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
       const code = crypto.randomBytes(24).toString('base64url');
       const result = await client.set(
         `${ROOM_LAUNCH_KEY_PREFIX}${code}`,
-        JSON.stringify(payload),
+        JSON.stringify({ status: 'pending', ...payload }),
         { EX: ROOM_LAUNCH_CODE_TTL_SECONDS, NX: true },
       );
       if (result === 'OK') {
@@ -67,15 +85,20 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
   async consume(
     code: string,
     expectedRoomId: string,
+    browserNonce: string,
   ): Promise<RoomLaunchPayload | undefined> {
-    if (!code || !expectedRoomId) {
+    if (!code || !expectedRoomId || !browserNonce) {
       return undefined;
     }
     const client = await this.getClient();
-    const raw = await client.sendCommand([
-      'GETDEL',
-      `${ROOM_LAUNCH_KEY_PREFIX}${code}`,
-    ]);
+    const raw = await client.eval(REDEEM_SCRIPT, {
+      keys: [`${ROOM_LAUNCH_KEY_PREFIX}${code}`],
+      arguments: [
+        expectedRoomId,
+        browserNonce,
+        String(ROOM_LAUNCH_REDEMPTION_TTL_SECONDS),
+      ],
+    });
     if (typeof raw !== 'string') {
       return undefined;
     }
@@ -93,6 +116,11 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
     } catch {
       return undefined;
     }
+  }
+
+  async ping(): Promise<boolean> {
+    const client = await this.getClient();
+    return (await client.ping()) === 'PONG';
   }
 
   async onModuleDestroy(): Promise<void> {

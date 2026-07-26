@@ -21,6 +21,7 @@ interface JoinPayload {
   telegramId: string;
   username?: string;
   roomId: string;
+  clientInstanceId?: string;
 }
 
 interface EditMember extends JoinPayload {
@@ -29,6 +30,7 @@ interface EditMember extends JoinPayload {
 
 interface Member {
   clientId: string;
+  clientInstanceId?: string;
   telegramId: string;
   username?: string;
   online: boolean;
@@ -216,7 +218,11 @@ export class RoomGateway
     return this.server?.sockets?.sockets?.get(clientId) as Socket | undefined;
   }
 
-  private async disconnectReplacedSocket(clientId: string, roomId: string) {
+  private async disconnectReplacedSocket(
+    clientId: string,
+    roomId: string,
+    notifyUser: boolean,
+  ) {
     this.forgetSocketMembership(clientId, roomId);
 
     const socket = this.getSocketById(clientId);
@@ -224,7 +230,9 @@ export class RoomGateway
       return;
     }
 
-    socket.emit('room-session-replaced', { roomId });
+    if (notifyUser) {
+      socket.emit('room-session-replaced', { roomId });
+    }
 
     try {
       await socket.leave(roomId);
@@ -334,7 +342,7 @@ export class RoomGateway
     @MessageBody() data: JoinPayload,
     @ConnectedSocket() client: Socket,
   ) {
-    const { telegramId, roomId, username } = data;
+    const { telegramId, roomId, username, clientInstanceId } = data;
 
     let room = await this.roomService.getRoom(roomId);
 
@@ -393,7 +401,15 @@ export class RoomGateway
 
     for (const member of sameIdentityMembers) {
       if (member.clientId !== client.id) {
-        await this.disconnectReplacedSocket(member.clientId, activeRoom.id);
+        const sameBrowserReconnect = Boolean(
+          clientInstanceId &&
+          member.clientInstanceId === clientInstanceId,
+        );
+        await this.disconnectReplacedSocket(
+          member.clientId,
+          activeRoom.id,
+          !sameBrowserReconnect,
+        );
       }
     }
 
@@ -419,6 +435,7 @@ export class RoomGateway
     if (existingMember) {
       existingMember.online = true;
       existingMember.clientId = client.id;
+      existingMember.clientInstanceId = clientInstanceId;
       existingMember.lastActivity = new Date();
       if (effectiveUsername) {
         existingMember.username = effectiveUsername;
@@ -426,6 +443,7 @@ export class RoomGateway
     } else {
       activeRoom?.members.push({
         clientId: client.id,
+        clientInstanceId,
         telegramId,
         username: effectiveUsername,
         online: true,

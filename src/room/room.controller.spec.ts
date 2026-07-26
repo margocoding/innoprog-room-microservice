@@ -5,7 +5,7 @@ import { RoomController } from './room.controller';
 
 describe('RoomController', () => {
   let controller: RoomController;
-  let roomService: { getRoom: jest.Mock; createRoom: jest.Mock };
+  let roomService: { getRoom: jest.Mock; createRoom: jest.Mock; deleteRoom: jest.Mock };
   let appService: {
     createAnonymousRoomUserId: jest.Mock;
     createRoomToken: jest.Mock;
@@ -21,6 +21,7 @@ describe('RoomController', () => {
     roomService = {
       getRoom: jest.fn().mockResolvedValue({ id: 'room-1', teacher: 'teacher-1' }),
       createRoom: jest.fn().mockResolvedValue({ id: 'room-1', teacher: 'teacher-1' }),
+      deleteRoom: jest.fn().mockResolvedValue({ success: true }),
     };
     appService = {
       createAnonymousRoomUserId: jest.fn(() => 'i999999'),
@@ -63,24 +64,27 @@ describe('RoomController', () => {
     expect(appService.createRoomLaunchCode).toHaveBeenCalledWith('room-1', 'teacher-1');
   });
 
-  it('still returns the signed room token when the launch-code store is unavailable', async () => {
+  it('rolls back a room and returns 503 when the launch-code store is unavailable', async () => {
     appService.createRoomLaunchCode.mockRejectedValue(new Error('Redis unavailable'));
 
-    const result = await controller.createRoom({ telegramId: 'teacher-1' } as any);
+    await expect(
+      controller.createRoom({ telegramId: 'teacher-1' } as any),
+    ).rejects.toMatchObject({ status: 503 });
 
-    expect(result.roomToken).toBe('token-room-1-teacher-1');
-    expect(result.roomLaunchCode).toBeUndefined();
+    expect(roomService.deleteRoom).toHaveBeenCalledWith('room-1', 'teacher-1');
   });
 
   it('exchanges a one-time launch code for an in-memory room token', async () => {
     const result = await controller.exchangeRoomLaunchCode('room-1', {
       launchCode: 'one-time-launch-code-123456',
-    }, { headers: {} } as any, response as any);
+      browserNonce: 'browser-nonce-123456',
+    }, response as any);
 
     expect(result).toEqual({ telegramId: 'teacher-1', roomToken: 'token-room-1-teacher-1' });
     expect(appService.consumeRoomLaunchCode).toHaveBeenCalledWith(
       'one-time-launch-code-123456',
       'room-1',
+      'browser-nonce-123456',
     );
     expect(response.cookie).toHaveBeenCalledWith(
       'ide_room_session_hash',
@@ -93,23 +97,25 @@ describe('RoomController', () => {
     );
   });
 
-  it('recovers the teacher identity from the room cookie when a consumed launch response is retried', async () => {
-    appService.consumeRoomLaunchCode.mockResolvedValue(undefined);
-    appService.verifyRoomBrowserSession.mockReturnValue({
+  it('returns the same teacher identity when the same browser retries redemption', async () => {
+    appService.consumeRoomLaunchCode.mockResolvedValue({
       roomId: 'room-1',
       userId: 'teacher-1',
     });
 
     const result = await controller.exchangeRoomLaunchCode(
       'room-1',
-      { launchCode: 'already-consumed-code' },
-      { headers: { cookie: 'ide_room_session_hash=signed-browser-session' } } as any,
+      {
+        launchCode: 'already-consumed-code',
+        browserNonce: 'browser-nonce-123456',
+      },
       response as any,
     );
 
-    expect(appService.verifyRoomBrowserSession).toHaveBeenCalledWith(
-      'signed-browser-session',
+    expect(appService.consumeRoomLaunchCode).toHaveBeenCalledWith(
+      'already-consumed-code',
       'room-1',
+      'browser-nonce-123456',
     );
     expect(result).toEqual({
       telegramId: 'teacher-1',
@@ -117,18 +123,16 @@ describe('RoomController', () => {
     });
   });
 
-  it('never upgrades an anonymous room cookie when a teacher launch code is missing', async () => {
+  it('rejects a launch code redeemed by another browser nonce', async () => {
     appService.consumeRoomLaunchCode.mockResolvedValue(undefined);
-    appService.verifyRoomBrowserSession.mockReturnValue({
-      roomId: 'room-1',
-      userId: 'i123456',
-    });
 
     await expect(
       controller.exchangeRoomLaunchCode(
         'room-1',
-        { launchCode: 'missing-code' },
-        { headers: { cookie: 'ide_room_session_hash=anonymous-session' } } as any,
+        {
+          launchCode: 'missing-code',
+          browserNonce: 'different-browser-nonce',
+        },
         response as any,
       ),
     ).rejects.toMatchObject({ status: 404 });

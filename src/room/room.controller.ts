@@ -11,6 +11,7 @@ import {
   Query,
   Req,
   Res,
+  ServiceUnavailableException,
   UseGuards,
   UsePipes,
   ValidationPipe,
@@ -50,18 +51,27 @@ export class RoomController {
   @Post('/')
   async createRoom(@Body() dto: CreateRoomDto): Promise<RoomRdo> {
     const room = await this.roomService.createRoom(dto);
-    const roomToken = this.appService.createRoomToken(room.id, room.teacher);
-    let roomLaunchCode: string | undefined;
+    let roomLaunchCode: string;
     try {
       roomLaunchCode = await this.appService.createRoomLaunchCode(room.id, room.teacher);
     } catch (error) {
-      this.logger.warn(
-        `Room ${room.id} created without optional launch code: ${error?.constructor?.name || 'Error'}`,
+      try {
+        await this.roomService.deleteRoom(room.id, room.teacher);
+      } catch (rollbackError) {
+        this.logger.error(
+          `Failed to roll back room ${room.id}: ${rollbackError?.constructor?.name || 'Error'}`,
+        );
+      }
+      this.logger.error(
+        `Launch store unavailable for room ${room.id}: ${error?.constructor?.name || 'Error'}`,
+      );
+      throw new ServiceUnavailableException(
+        'Не удалось подготовить безопасный вход в комнату',
       );
     }
     return {
       ...room,
-      roomToken,
+      roomToken: this.appService.createRoomToken(room.id, room.teacher),
       roomLaunchCode,
     };
   }
@@ -71,21 +81,13 @@ export class RoomController {
   async exchangeRoomLaunchCode(
     @Param('id') id: string,
     @Body() dto: ExchangeRoomLaunchCodeDto,
-    @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ): Promise<{ telegramId: string; roomToken: string }> {
-    let launch = await this.appService.consumeRoomLaunchCode(dto.launchCode, id);
-    if (!launch) {
-      const cookieName = this.appService.getRoomSessionCookieName(id);
-      const cookieToken = this.readCookie(request.headers.cookie, cookieName);
-      const existing = cookieToken
-        ? this.appService.verifyRoomBrowserSession(cookieToken, id)
-        : undefined;
-      const room = existing ? await this.roomService.getRoom(id) : undefined;
-      if (existing && room?.teacher === existing.userId) {
-        launch = { roomId: id, userId: existing.userId };
-      }
-    }
+    const launch = await this.appService.consumeRoomLaunchCode(
+      dto.launchCode,
+      id,
+      dto.browserNonce,
+    );
     if (!launch) {
       throw new NotFoundException('Launch code not found or expired');
     }

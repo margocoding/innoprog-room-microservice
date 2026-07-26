@@ -1,4 +1,4 @@
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -19,7 +19,12 @@ async function bootstrap() {
   SwaggerModule.setup('/api/docs', app, documentFactory);
 
   //  app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
-  app.setGlobalPrefix('/api');
+  app.setGlobalPrefix('/api', {
+    exclude: [
+      { path: 'health/live', method: RequestMethod.GET },
+      { path: 'health/ready', method: RequestMethod.GET },
+    ],
+  });
 
   await app.listen(process.env.PORT ?? 3000);
 }
