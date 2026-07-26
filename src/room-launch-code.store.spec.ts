@@ -50,6 +50,12 @@ describe('RoomLaunchCodeStore', () => {
       'GETDEL',
       `innoprog:ide-room:launch:${code}`,
     ]);
+    expect(createClient).toHaveBeenCalledWith(expect.objectContaining({
+      socket: {
+        connectTimeout: 1000,
+        reconnectStrategy: false,
+      },
+    }));
   });
 
   it('rejects a code for another room after atomically consuming it', async () => {

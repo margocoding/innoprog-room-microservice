@@ -29,6 +29,10 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
         process.env.IDE_ROOMS_REDIS_URL ||
         process.env.REDIS_URL ||
         'redis://redis:6379',
+      socket: {
+        connectTimeout: 1000,
+        reconnectStrategy: false,
+      },
     });
     client.on('error', (error) => {
       console.error('IDE room launch Redis error', {

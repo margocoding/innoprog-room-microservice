@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Logger,
   NotFoundException,
   Param,
   Post,
@@ -36,6 +37,8 @@ import { ExchangeRoomLaunchCodeDto } from './dto/exchange-room-launch-code-dto';
 @Controller('room')
 @UsePipes(new ValidationPipe({ whitelist: true }))
 export class RoomController {
+  private readonly logger = new Logger(RoomController.name);
+
   constructor(
     private readonly roomService: RoomService,
     private readonly appService: AppService,
@@ -47,10 +50,19 @@ export class RoomController {
   @Post('/')
   async createRoom(@Body() dto: CreateRoomDto): Promise<RoomRdo> {
     const room = await this.roomService.createRoom(dto);
+    const roomToken = this.appService.createRoomToken(room.id, room.teacher);
+    let roomLaunchCode: string | undefined;
+    try {
+      roomLaunchCode = await this.appService.createRoomLaunchCode(room.id, room.teacher);
+    } catch (error) {
+      this.logger.warn(
+        `Room ${room.id} created without optional launch code: ${error?.constructor?.name || 'Error'}`,
+      );
+    }
     return {
       ...room,
-      roomToken: this.appService.createRoomToken(room.id, room.teacher),
-      roomLaunchCode: await this.appService.createRoomLaunchCode(room.id, room.teacher),
+      roomToken,
+      roomLaunchCode,
     };
   }
 

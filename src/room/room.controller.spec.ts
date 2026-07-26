@@ -63,6 +63,15 @@ describe('RoomController', () => {
     expect(appService.createRoomLaunchCode).toHaveBeenCalledWith('room-1', 'teacher-1');
   });
 
+  it('still returns the signed room token when the launch-code store is unavailable', async () => {
+    appService.createRoomLaunchCode.mockRejectedValue(new Error('Redis unavailable'));
+
+    const result = await controller.createRoom({ telegramId: 'teacher-1' } as any);
+
+    expect(result.roomToken).toBe('token-room-1-teacher-1');
+    expect(result.roomLaunchCode).toBeUndefined();
+  });
+
   it('exchanges a one-time launch code for an in-memory room token', async () => {
     const result = await controller.exchangeRoomLaunchCode('room-1', {
       launchCode: 'one-time-launch-code-123456',
