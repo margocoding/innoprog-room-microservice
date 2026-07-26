@@ -1,4 +1,10 @@
-import { IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 
 export class ExchangeRoomLaunchCodeDto {
   @IsString()
@@ -7,6 +13,7 @@ export class ExchangeRoomLaunchCodeDto {
   @Matches(/^[A-Za-z0-9_-]+$/)
   launchCode: string;
 
+  @IsOptional()
   @IsString()
   @MinLength(16)
   @MaxLength(128)

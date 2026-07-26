@@ -97,6 +97,25 @@ describe('AppService room tokens', () => {
         });
     });
 
+    it('keeps launch exchange compatible with already-open legacy clients', async () => {
+        const launchCodeStore = {
+            create: jest.fn(),
+            consume: jest.fn().mockResolvedValue({
+                roomId: 'room-1',
+                userId: 'teacher-1',
+            }),
+        };
+        const service = new AppService(launchCodeStore as any);
+
+        await service.consumeRoomLaunchCode('legacy-launch-code', 'room-1');
+
+        expect(launchCodeStore.consume).toHaveBeenCalledWith(
+            'legacy-launch-code',
+            'room-1',
+            expect.stringMatching(/^[A-Za-z0-9_-]+$/),
+        );
+    });
+
     it('verifies valid tokens and rejects tampering, expiration and room mismatch', () => {
         const service = new AppService();
         const token = service.createRoomToken('room-1', 'student-1', 120) as string;
