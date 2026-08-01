@@ -142,6 +142,23 @@ function isSocketCorsOriginAllowed(origin?: string): boolean {
   return socketCorsAllowedOrigins.has(origin.replace(/\/+$/, ''));
 }
 
+function applyYjsUpdate(doc: Y.Doc, update: Uint8Array): Uint8Array | null {
+  const integratedUpdates: Uint8Array[] = [];
+  const handleUpdate = (integratedUpdate: Uint8Array) => {
+    integratedUpdates.push(new Uint8Array(integratedUpdate));
+  };
+  doc.on('update', handleUpdate);
+  try {
+    Y.applyUpdate(doc, update);
+  } finally {
+    doc.off('update', handleUpdate);
+  }
+  if (integratedUpdates.length === 0) return null;
+  return integratedUpdates.length === 1
+    ? integratedUpdates[0]
+    : Y.mergeUpdates(integratedUpdates);
+}
+
 @WebSocketGateway({
   cors: {
     origin: (origin, callback) => {
@@ -685,7 +702,7 @@ export class RoomGateway
             error: 'Сессия комнаты устарела',
           };
         }
-        Y.applyUpdate(doc, update);
+        const integratedUpdate = applyYjsUpdate(doc, update);
         const version = this.markRoomSnapshotDirty(data.roomId);
 
         const member = activeRoom.members.find(
@@ -693,12 +710,14 @@ export class RoomGateway
         );
         if (member) member.lastActivity = new Date();
 
-        client.broadcast.to(activeRoom.id).emit('code-edit-action', {
-          telegramId: data.telegramId,
-          userColor: member?.userColor,
-          username: member?.username,
-          update,
-        });
+        if (integratedUpdate) {
+          client.broadcast.to(activeRoom.id).emit('code-edit-action', {
+            telegramId: data.telegramId,
+            userColor: member?.userColor,
+            username: member?.username,
+            update: integratedUpdate,
+          });
+        }
 
         await this.waitForPersistedSnapshot(data.roomId, version);
 
@@ -966,14 +985,16 @@ export class RoomGateway
       });
     }
 
-    Y.applyUpdate(doc, data.update);
+    const update = this.normalizeBinaryUpdate(data.update);
+    const integratedUpdate = applyYjsUpdate(doc, update);
+    if (!integratedUpdate) return;
     this.markRoomSnapshotDirty(data.roomId);
 
     client.broadcast.to(activeRoom.id).emit('code-edit-action', {
       telegramId: data.telegramId,
       userColor: member?.userColor,
       username: member?.username,
-      update: data.update,
+      update: integratedUpdate,
     });
   }
 

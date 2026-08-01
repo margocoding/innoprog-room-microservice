@@ -391,6 +391,173 @@ describe('RoomGateway membership sync', () => {
       sequence: 7,
     });
     expect(roomService.saveRoomSnapshot).toHaveBeenCalledTimes(1);
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rebroadcast a durable update already applied by the fast channel', async () => {
+    const { gateway } = createGateway();
+    const teacher = createClient('socket-teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      teacher,
+    );
+    teacher.broadcast.to.mockClear();
+
+    const source = new Y.Doc();
+    source.getText('codemirror').insert(0, 'fast then durable');
+    const update = Y.encodeStateAsUpdate(source);
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update,
+    });
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+
+    const response = gateway.handleCodeSyncUpdate(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-1',
+        sequence: 8,
+        update,
+      },
+      teacher,
+    );
+    await jest.advanceTimersByTimeAsync(1_000);
+
+    await expect(response).resolves.toEqual({
+      ok: true,
+      persisted: true,
+      sequence: 8,
+    });
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not rebroadcast a fast update already applied by the durable channel', async () => {
+    const { gateway } = createGateway();
+    const teacher = createClient('socket-teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      teacher,
+    );
+    teacher.broadcast.to.mockClear();
+
+    const source = new Y.Doc();
+    source.getText('codemirror').insert(0, 'durable then fast');
+    const update = Y.encodeStateAsUpdate(source);
+    const response = gateway.handleCodeSyncUpdate(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-1',
+        sequence: 9,
+        update,
+      },
+      teacher,
+    );
+    await Promise.resolve();
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update,
+    });
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    await expect(response).resolves.toEqual({
+      ok: true,
+      persisted: true,
+      sequence: 9,
+    });
+  });
+
+  it('broadcasts a deletion-only durable update on its first application', async () => {
+    const { gateway } = createGateway();
+    const teacher = createClient('socket-teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      teacher,
+    );
+
+    const source = new Y.Doc();
+    let update = new Uint8Array();
+    source.on('update', (value: Uint8Array) => {
+      update = new Uint8Array(value);
+    });
+    source.getText('codemirror').insert(0, 'delete me');
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update,
+    });
+    teacher.broadcast.to.mockClear();
+
+    source.getText('codemirror').delete(0, source.getText('codemirror').length);
+    const response = gateway.handleCodeSyncUpdate(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-1',
+        sequence: 10,
+        update,
+      },
+      teacher,
+    );
+    await Promise.resolve();
+
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+    expect(
+      teacher.broadcast.to.mock.results.at(-1).value.emit,
+    ).toHaveBeenCalledWith(
+      'code-edit-action',
+      expect.objectContaining({ update }),
+    );
+    await jest.advanceTimersByTimeAsync(1_000);
+    await expect(response).resolves.toEqual({
+      ok: true,
+      persisted: true,
+      sequence: 10,
+    });
+  });
+
+  it('broadcasts all integrated content when dependent updates arrive out of order', async () => {
+    const { gateway } = createGateway();
+    const teacher = createClient('socket-teacher');
+    await gateway.handleJoinRoom(
+      { telegramId: 'teacher-1', roomId: 'room-1' },
+      teacher,
+    );
+    teacher.broadcast.to.mockClear();
+
+    const source = new Y.Doc();
+    const updates: Uint8Array[] = [];
+    source.on('update', (update: Uint8Array) => {
+      updates.push(new Uint8Array(update));
+    });
+    source.getText('codemirror').insert(0, 'a');
+    source.getText('codemirror').insert(1, 'b');
+
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update: updates[1],
+    });
+    expect(teacher.broadcast.to).not.toHaveBeenCalled();
+
+    await gateway.handleCodeEdit(teacher, {
+      telegramId: 'teacher-1',
+      roomId: 'room-1',
+      update: updates[0],
+    });
+    expect(teacher.broadcast.to).toHaveBeenCalledTimes(1);
+    const broadcast = teacher.broadcast.to.mock.results[0].value.emit.mock.calls.find(
+      ([event]: [string]) => event === 'code-edit-action',
+    )![1].update;
+    const replica = new Y.Doc();
+    Y.applyUpdate(replica, broadcast);
+    expect(replica.getText('codemirror').toString()).toBe('ab');
   });
 
   it('deduplicates a repeated browser sequence including concurrent retries', async () => {
@@ -797,7 +964,9 @@ describe('RoomGateway events', () => {
       { roomId: 'room-1', telegramId: 'student' },
       client,
     );
-    const update = Y.encodeStateAsUpdate(new Y.Doc());
+    const source = new Y.Doc();
+    source.getText('codemirror').insert(0, 'allowed edit');
+    const update = Y.encodeStateAsUpdate(source);
     await gateway.handleCodeEdit(client, {
       roomId: 'room-1',
       telegramId: 'student',
