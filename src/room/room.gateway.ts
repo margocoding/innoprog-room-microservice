@@ -16,6 +16,7 @@ import * as Y from 'yjs';
 import { BeforeApplicationShutdown, Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
 import { Language } from '@prisma/client';
+import { createHmac, randomBytes } from 'node:crypto';
 
 interface JoinPayload {
   telegramId: string;
@@ -96,6 +97,15 @@ interface CodeEditPayload {
   update: Uint8Array;
 }
 
+interface CodeSyncInitPayload extends JoinPayload {
+  stateVector: Uint8Array;
+}
+
+interface CodeSyncUpdatePayload extends CodeEditPayload {
+  clientInstanceId: string;
+  sequence: number;
+}
+
 interface SocketMembership {
   roomId: string;
   telegramId: string;
@@ -151,11 +161,18 @@ export class RoomGateway
   implements OnGatewayConnection, OnGatewayDisconnect, BeforeApplicationShutdown
 {
   private readonly logger = new Logger(RoomGateway.name);
+  private readonly logHashKey =
+    process.env.ROOM_LOG_HASH_SECRET ||
+    process.env.ROOM_TOKEN_SECRET ||
+    randomBytes(32).toString('hex');
   private readonly SNAPSHOT_INTERVAL_MS = Number(
     process.env.ROOM_SNAPSHOT_INTERVAL_MS ?? 5_000,
   );
   private readonly SNAPSHOT_DEBOUNCE_MS = Number(
     process.env.ROOM_SNAPSHOT_DEBOUNCE_MS ?? 1_000,
+  );
+  private readonly SNAPSHOT_ACK_TIMEOUT_MS = Number(
+    process.env.ROOM_SNAPSHOT_ACK_TIMEOUT_MS ?? 10_000,
   );
   private docs = new Map<string, Y.Doc>();
   private docInitTasks = new Map<string, Promise<Y.Doc>>();
@@ -163,8 +180,30 @@ export class RoomGateway
   private snapshotDebounceTimers = new Map<string, NodeJS.Timeout>();
   private snapshotDirtyRooms = new Set<string>();
   private snapshotSavingRooms = new Set<string>();
+  private snapshotVersions = new Map<string, number>();
+  private persistedSnapshotVersions = new Map<string, number>();
+  private snapshotFlushTasks = new Map<string, Promise<void>>();
+  private snapshotWaiters = new Map<
+    string,
+    Array<{
+      version: number;
+      resolve: () => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }>
+  >();
+  private codeSyncRequests = new Map<
+    string,
+    Promise<{
+      ok: boolean;
+      persisted?: boolean;
+      sequence: number;
+      error?: string;
+    }>
+  >();
   private lastPersistedSnapshots = new Map<string, string | null>();
   private socketMemberships = new Map<string, Map<string, SocketMembership>>();
+  private disconnectReasons = new Map<string, string>();
 
   constructor(private readonly roomService: RoomService) {}
 
@@ -180,6 +219,28 @@ export class RoomGateway
       userColor: member.userColor,
       lastActivity: member.lastActivity,
     }));
+  }
+
+  private userHash(value?: string): string {
+    if (!value) return 'anonymous';
+    return createHmac('sha256', this.logHashKey)
+      .update(value)
+      .digest('hex')
+      .slice(0, 16);
+  }
+
+  private normalizeBinaryUpdate(value: unknown): Uint8Array {
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    if (Array.isArray(value)) return new Uint8Array(value);
+    const bufferLike = value as { data?: number[] } | null;
+    if (bufferLike?.data && Array.isArray(bufferLike.data)) {
+      return new Uint8Array(bufferLike.data);
+    }
+    throw new Error('Invalid Yjs update payload');
   }
 
   private emitMembersUpdated(room: Room, trigger: string, telegramId: string) {
@@ -215,7 +276,22 @@ export class RoomGateway
   }
 
   private getSocketById(clientId: string): Socket | undefined {
-    return this.server?.sockets?.sockets?.get(clientId) as Socket | undefined;
+    return this.server?.sockets?.sockets?.get(clientId);
+  }
+
+  private isCurrentSocketMember(
+    client: Socket,
+    roomId: string,
+    telegramId: string,
+  ): boolean {
+    const membership = this.socketMemberships.get(client.id)?.get(roomId);
+    if (!membership || membership.telegramId !== telegramId) return false;
+
+    const activeRoom = this.activeRooms.find((room) => room.id === roomId);
+    const member = activeRoom?.members.find(
+      (item) => item.telegramId === telegramId,
+    );
+    return Boolean(member?.online && member.clientId === client.id);
   }
 
   private async disconnectReplacedSocket(
@@ -363,7 +439,8 @@ export class RoomGateway
       telegramId,
       username,
     );
-    const effectiveUsername = username || persistedMember?.username || undefined;
+    const effectiveUsername =
+      username || persistedMember?.username || undefined;
 
     await this.markSocketLeft(client, { exceptRoomId: room.id });
     await client.join(room.id);
@@ -402,8 +479,7 @@ export class RoomGateway
     for (const member of sameIdentityMembers) {
       if (member.clientId !== client.id) {
         const sameBrowserReconnect = Boolean(
-          clientInstanceId &&
-          member.clientInstanceId === clientInstanceId,
+          clientInstanceId && member.clientInstanceId === clientInstanceId,
         );
         await this.disconnectReplacedSocket(
           member.clientId,
@@ -453,6 +529,15 @@ export class RoomGateway
     }
 
     this.rememberSocketMembership(client.id, activeRoom.id, telegramId);
+    this.logger.log(
+      JSON.stringify({
+        event: sameIdentityMembers.length > 0 ? 'room_rejoin' : 'room_join',
+        roomId: activeRoom.id,
+        userHash: this.userHash(telegramId),
+        clientInstanceHash: this.userHash(clientInstanceId),
+        transport: client.conn?.transport?.name,
+      }),
+    );
     this.emitMembersUpdated(activeRoom, 'join', telegramId);
 
     const currentCursors = activeRoom?.members
@@ -502,6 +587,166 @@ export class RoomGateway
     });
   }
 
+  @SubscribeMessage('code-sync:init') async handleCodeSyncInit(
+    @MessageBody() data: CodeSyncInitPayload,
+    @ConnectedSocket() client: Socket,
+  ) {
+    try {
+      if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+        return { ok: false, error: 'Сессия комнаты устарела' };
+      }
+      const doc = await this.getOrCreateDoc(data.roomId);
+      if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+        return { ok: false, error: 'Сессия комнаты устарела' };
+      }
+      const clientStateVector = this.normalizeBinaryUpdate(data.stateVector);
+      const serverUpdate = Y.encodeStateAsUpdate(doc, clientStateVector);
+      const serverStateVector = Y.encodeStateVector(doc);
+
+      this.logger.log(
+        JSON.stringify({
+          event: 'code_sync_init',
+          roomId: data.roomId,
+          userHash: this.userHash(data.telegramId),
+          clientInstanceHash: this.userHash(data.clientInstanceId),
+          serverUpdateBytes: serverUpdate.byteLength,
+        }),
+      );
+
+      return {
+        ok: true,
+        serverUpdate,
+        serverStateVector,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        JSON.stringify({
+          event: 'code_sync_init_failed',
+          roomId: data.roomId,
+          userHash: this.userHash(data.telegramId),
+          reason: message,
+        }),
+      );
+      return { ok: false, error: 'Не удалось синхронизировать код' };
+    }
+  }
+
+  @SubscribeMessage('code-sync:update') async handleCodeSyncUpdate(
+    @MessageBody() data: CodeSyncUpdatePayload,
+    @ConnectedSocket() client: Socket,
+  ) {
+    const activeRoom = this.activeRooms.find((room) => room.id === data.roomId);
+    if (!activeRoom) {
+      return {
+        ok: false,
+        sequence: data.sequence,
+        error: 'Комната не найдена',
+      };
+    }
+    if (activeRoom.completed && activeRoom.teacher !== data.telegramId) {
+      return { ok: false, sequence: data.sequence, error: 'Комната завершена' };
+    }
+    if (
+      !activeRoom.studentEditCodeEnabled &&
+      data.telegramId !== activeRoom.teacher
+    ) {
+      return {
+        ok: false,
+        sequence: data.sequence,
+        error: 'Редактирование кода отключено в этой комнате',
+      };
+    }
+    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+      return {
+        ok: false,
+        sequence: data.sequence,
+        error: 'Сессия комнаты устарела',
+      };
+    }
+
+    const requestKey = [
+      data.roomId,
+      data.telegramId,
+      data.clientInstanceId,
+      String(data.sequence),
+    ].join(':');
+    const existingRequest = this.codeSyncRequests.get(requestKey);
+    if (existingRequest) return existingRequest;
+
+    const request = (async () => {
+      try {
+        const update = this.normalizeBinaryUpdate(data.update);
+        const doc = await this.getOrCreateDoc(data.roomId);
+        if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+          return {
+            ok: false,
+            sequence: data.sequence,
+            error: 'Сессия комнаты устарела',
+          };
+        }
+        Y.applyUpdate(doc, update);
+        const version = this.markRoomSnapshotDirty(data.roomId);
+
+        const member = activeRoom.members.find(
+          (item) => item.telegramId === data.telegramId,
+        );
+        if (member) member.lastActivity = new Date();
+
+        client.broadcast.to(activeRoom.id).emit('code-edit-action', {
+          telegramId: data.telegramId,
+          userColor: member?.userColor,
+          username: member?.username,
+          update,
+        });
+
+        await this.waitForPersistedSnapshot(data.roomId, version);
+
+        this.logger.log(
+          JSON.stringify({
+            event: 'code_sync_ack',
+            roomId: data.roomId,
+            userHash: this.userHash(data.telegramId),
+            clientInstanceHash: this.userHash(data.clientInstanceId),
+            sequence: data.sequence,
+            updateBytes: update.byteLength,
+            snapshotVersion: version,
+          }),
+        );
+
+        return { ok: true, persisted: true, sequence: data.sequence };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          JSON.stringify({
+            event: 'code_sync_update_failed',
+            roomId: data.roomId,
+            userHash: this.userHash(data.telegramId),
+            sequence: data.sequence,
+            reason: message,
+          }),
+        );
+        return {
+          ok: false,
+          sequence: data.sequence,
+          error: 'Не удалось сохранить изменение кода',
+        };
+      }
+    })();
+
+    this.codeSyncRequests.set(requestKey, request);
+    void request.then((response) => {
+      if (!response.ok && this.codeSyncRequests.get(requestKey) === request) {
+        this.codeSyncRequests.delete(requestKey);
+      }
+    });
+    if (this.codeSyncRequests.size > 2_048) {
+      const oldestKey = Array.from(this.codeSyncRequests.keys())[0];
+      if (oldestKey) this.codeSyncRequests.delete(oldestKey);
+    }
+    return request;
+  }
+
   @SubscribeMessage('edit-room') async handleEditRoom(
     client: Socket,
     @MessageBody() data: EditPayload,
@@ -516,7 +761,7 @@ export class RoomGateway
 
     if (
       data.language !== undefined &&
-      !Object.values(Language).includes(data.language as Language)
+      !Object.values(Language).includes(data.language)
     ) {
       client.emit('edit-room:error', {
         message: 'Неподдерживаемый язык программирования',
@@ -700,6 +945,11 @@ export class RoomGateway
         message: 'Не указан telegramId',
       });
     }
+    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+      return client.emit('error', {
+        message: 'Сессия комнаты устарела',
+      });
+    }
 
     const member = activeRoom.members.find(
       (m) => m.telegramId === data.telegramId,
@@ -710,9 +960,14 @@ export class RoomGateway
     }
 
     const doc = await this.getOrCreateDoc(data.roomId);
+    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+      return client.emit('error', {
+        message: 'Сессия комнаты устарела',
+      });
+    }
 
     Y.applyUpdate(doc, data.update);
-    this.scheduleRoomSnapshot(data.roomId);
+    this.markRoomSnapshotDirty(data.roomId);
 
     client.broadcast.to(activeRoom.id).emit('code-edit-action', {
       telegramId: data.telegramId,
@@ -787,6 +1042,22 @@ export class RoomGateway
   }
 
   async handleDisconnect(client: Socket) {
+    const memberships = Array.from(
+      this.socketMemberships.get(client.id)?.values() ?? [],
+    );
+    for (const membership of memberships) {
+      this.logger.log(
+        JSON.stringify({
+          event: 'socket_disconnect',
+          roomId: membership.roomId,
+          userHash: this.userHash(membership.telegramId),
+          transport: client.conn?.transport?.name,
+          reason:
+            this.disconnectReasons.get(client.id) || client.conn?.readyState,
+        }),
+      );
+    }
+    this.disconnectReasons.delete(client.id);
     await this.markSocketLeft(client);
   }
 
@@ -818,7 +1089,9 @@ export class RoomGateway
     this.timers.set(roomId, timer);
   }
 
-  private scheduleRoomSnapshot(roomId: string): void {
+  private markRoomSnapshotDirty(roomId: string): number {
+    const version = (this.snapshotVersions.get(roomId) ?? 0) + 1;
+    this.snapshotVersions.set(roomId, version);
     this.snapshotDirtyRooms.add(roomId);
 
     const existingTimer = this.snapshotDebounceTimers.get(roomId);
@@ -833,6 +1106,57 @@ export class RoomGateway
     timer.unref?.();
 
     this.snapshotDebounceTimers.set(roomId, timer);
+    return version;
+  }
+
+  private waitForPersistedSnapshot(
+    roomId: string,
+    version: number,
+  ): Promise<void> {
+    if ((this.persistedSnapshotVersions.get(roomId) ?? 0) >= version) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.snapshotWaiters.get(roomId) ?? [];
+      const waiter = {
+        version,
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          const currentWaiters = this.snapshotWaiters.get(roomId) ?? [];
+          const remaining = currentWaiters.filter((item) => item !== waiter);
+          if (remaining.length > 0) this.snapshotWaiters.set(roomId, remaining);
+          else this.snapshotWaiters.delete(roomId);
+          reject(new Error('Snapshot acknowledgement timed out'));
+        }, this.SNAPSHOT_ACK_TIMEOUT_MS),
+      };
+      waiter.timeout.unref?.();
+      waiters.push(waiter);
+      this.snapshotWaiters.set(roomId, waiters);
+    });
+  }
+
+  private settleSnapshotWaiters(
+    roomId: string,
+    persistedVersion: number,
+    error?: Error,
+  ): void {
+    const waiters = this.snapshotWaiters.get(roomId) ?? [];
+    const remaining: typeof waiters = [];
+
+    for (const waiter of waiters) {
+      if (waiter.version <= persistedVersion || error) {
+        clearTimeout(waiter.timeout);
+        if (error) waiter.reject(error);
+        else waiter.resolve();
+      } else {
+        remaining.push(waiter);
+      }
+    }
+
+    if (remaining.length > 0) this.snapshotWaiters.set(roomId, remaining);
+    else this.snapshotWaiters.delete(roomId);
   }
 
   private cleanupRoomState(roomId: string): void {
@@ -850,6 +1174,17 @@ export class RoomGateway
 
     this.snapshotDirtyRooms.delete(roomId);
     this.snapshotSavingRooms.delete(roomId);
+    this.snapshotVersions.delete(roomId);
+    this.persistedSnapshotVersions.delete(roomId);
+    this.snapshotFlushTasks.delete(roomId);
+    for (const key of this.codeSyncRequests.keys()) {
+      if (key.startsWith(`${roomId}:`)) this.codeSyncRequests.delete(key);
+    }
+    this.settleSnapshotWaiters(
+      roomId,
+      Number.MAX_SAFE_INTEGER,
+      new Error('Room state was disposed before persistence'),
+    );
     this.docInitTasks.delete(roomId);
     this.lastPersistedSnapshots.delete(roomId);
 
@@ -864,43 +1199,85 @@ export class RoomGateway
     roomId: string,
     options: { force?: boolean } = {},
   ): Promise<void> {
-    const { force = false } = options;
-    const isDirty = this.snapshotDirtyRooms.has(roomId);
+    let force = options.force ?? false;
+    let failed = false;
+    const existingTask = this.snapshotFlushTasks.get(roomId);
+    if (existingTask) return existingTask;
 
-    if (!force && !isDirty) {
-      return;
-    }
+    if (!force && !this.snapshotDirtyRooms.has(roomId)) return;
 
-    if (this.snapshotSavingRooms.has(roomId)) {
-      return;
-    }
+    const task = (async () => {
+      this.snapshotSavingRooms.add(roomId);
+      try {
+        do {
+          const doc = this.docs.get(roomId);
+          if (!doc) return;
 
-    const doc = this.docs.get(roomId);
-    if (!doc) {
-      return;
-    }
+          const version = this.snapshotVersions.get(roomId) ?? 0;
+          const persistedVersion =
+            this.persistedSnapshotVersions.get(roomId) ?? 0;
+          if (!force && persistedVersion >= version) break;
 
-    this.snapshotSavingRooms.add(roomId);
+          const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc)).toString(
+            'base64',
+          );
 
-    try {
-      const snapshot = Buffer.from(Y.encodeStateAsUpdate(doc)).toString(
-        'base64',
-      );
+          if (this.lastPersistedSnapshots.get(roomId) !== snapshot) {
+            await this.roomService.saveRoomSnapshot(roomId, snapshot);
+            this.lastPersistedSnapshots.set(roomId, snapshot);
+          }
 
-      if (!isDirty && this.lastPersistedSnapshots.get(roomId) === snapshot) {
-        return;
+          this.persistedSnapshotVersions.set(roomId, version);
+          this.settleSnapshotWaiters(roomId, version);
+          this.logger.log(
+            JSON.stringify({
+              event: 'room_snapshot_persisted',
+              roomId,
+              snapshotVersion: version,
+              snapshotBytes: snapshot.length,
+            }),
+          );
+          force = false;
+        } while (
+          (this.persistedSnapshotVersions.get(roomId) ?? 0) <
+          (this.snapshotVersions.get(roomId) ?? 0)
+        );
+
+        if (
+          (this.persistedSnapshotVersions.get(roomId) ?? 0) >=
+          (this.snapshotVersions.get(roomId) ?? 0)
+        ) {
+          this.snapshotDirtyRooms.delete(roomId);
+        }
+      } catch (error) {
+        failed = true;
+        const normalizedError =
+          error instanceof Error ? error : new Error(String(error));
+        this.logger.error(
+          `Cannot persist room snapshot for room ${roomId}: ${normalizedError.message}`,
+        );
+        this.settleSnapshotWaiters(
+          roomId,
+          this.snapshotVersions.get(roomId) ?? 0,
+          normalizedError,
+        );
+      } finally {
+        this.snapshotSavingRooms.delete(roomId);
       }
+    })();
 
-      await this.roomService.saveRoomSnapshot(roomId, snapshot);
-      this.lastPersistedSnapshots.set(roomId, snapshot);
-      this.snapshotDirtyRooms.delete(roomId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.error(
-        `Cannot persist room snapshot for room ${roomId}: ${message}`,
-      );
+    this.snapshotFlushTasks.set(roomId, task);
+    try {
+      await task;
     } finally {
-      this.snapshotSavingRooms.delete(roomId);
+      if (this.snapshotFlushTasks.get(roomId) === task) {
+        this.snapshotFlushTasks.delete(roomId);
+      }
+      if (this.snapshotDirtyRooms.has(roomId)) {
+        const retry = () => void this.flushRoomSnapshot(roomId);
+        if (failed) setTimeout(retry, 1_000).unref?.();
+        else queueMicrotask(retry);
+      }
     }
   }
 
@@ -936,6 +1313,8 @@ export class RoomGateway
       }
 
       this.docs.set(roomId, doc);
+      this.snapshotVersions.set(roomId, 0);
+      this.persistedSnapshotVersions.set(roomId, 0);
       return doc;
     })();
 
@@ -948,5 +1327,16 @@ export class RoomGateway
     }
   }
 
-  handleConnection() {}
+  handleConnection(client: Socket) {
+    client.once('disconnect', (reason) => {
+      this.disconnectReasons.set(client.id, reason);
+    });
+    this.logger.log(
+      JSON.stringify({
+        event: 'socket_connect',
+        socketHash: this.userHash(client.id),
+        transport: client.conn?.transport?.name,
+      }),
+    );
+  }
 }
