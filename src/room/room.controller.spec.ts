@@ -15,7 +15,7 @@ describe('RoomController', () => {
     getRoomSessionCookieName: jest.Mock;
     verifyRoomBrowserSession: jest.Mock;
   };
-  let response: { cookie: jest.Mock };
+  let response: { cookie: jest.Mock; clearCookie: jest.Mock };
 
   beforeEach(async () => {
     roomService = {
@@ -34,7 +34,7 @@ describe('RoomController', () => {
       getRoomSessionCookieName: jest.fn(() => 'ide_room_session_hash'),
       verifyRoomBrowserSession: jest.fn(),
     };
-    response = { cookie: jest.fn() };
+    response = { cookie: jest.fn(), clearCookie: jest.fn() };
 
     const module: TestingModule = await Test.createTestingModule({
       controllers: [RoomController],
@@ -78,7 +78,7 @@ describe('RoomController', () => {
     const result = await controller.exchangeRoomLaunchCode('room-1', {
       launchCode: 'one-time-launch-code-123456',
       browserNonce: 'browser-nonce-123456',
-    }, response as any);
+    }, { headers: {} } as any, response as any);
 
     expect(result).toEqual({ telegramId: 'teacher-1', roomToken: 'token-room-1-teacher-1' });
     expect(appService.consumeRoomLaunchCode).toHaveBeenCalledWith(
@@ -93,6 +93,7 @@ describe('RoomController', () => {
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
+        path: '/api/room/room-1',
       }),
     );
   });
@@ -109,6 +110,7 @@ describe('RoomController', () => {
         launchCode: 'already-consumed-code',
         browserNonce: 'browser-nonce-123456',
       },
+      { headers: {} } as any,
       response as any,
     );
 
@@ -133,6 +135,7 @@ describe('RoomController', () => {
           launchCode: 'missing-code',
           browserNonce: 'different-browser-nonce',
         },
+        { headers: {} } as any,
         response as any,
       ),
     ).rejects.toMatchObject({ status: 404 });
@@ -192,5 +195,35 @@ describe('RoomController', () => {
       'room-1',
     );
     expect(appService.createAnonymousRoomUserId).not.toHaveBeenCalled();
+  });
+
+  it('expires accumulated root-scoped room cookies during launch exchange', async () => {
+    await controller.exchangeRoomLaunchCode(
+      'room-1',
+      {
+        launchCode: 'one-time-launch-code-123456',
+        browserNonce: 'browser-nonce-123456',
+      },
+      {
+        headers: {
+          cookie: [
+            'ide_room_session_0123456789abcdefabcd=old-one',
+            'unrelated=value',
+            'ide_room_session_fedcba9876543210abcd=old-two',
+          ].join('; '),
+        },
+      } as any,
+      response as any,
+    );
+
+    expect(response.clearCookie).toHaveBeenCalledTimes(2);
+    expect(response.clearCookie).toHaveBeenCalledWith(
+      'ide_room_session_0123456789abcdefabcd',
+      expect.objectContaining({ path: '/', httpOnly: true, secure: true }),
+    );
+    expect(response.clearCookie).not.toHaveBeenCalledWith(
+      'unrelated',
+      expect.anything(),
+    );
   });
 });

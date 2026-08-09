@@ -81,6 +81,7 @@ export class RoomController {
   async exchangeRoomLaunchCode(
     @Param('id') id: string,
     @Body() dto: ExchangeRoomLaunchCodeDto,
+    @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ): Promise<{ telegramId: string; roomToken: string }> {
     const launch = await this.appService.consumeRoomLaunchCode(
@@ -95,6 +96,7 @@ export class RoomController {
     if (!roomToken) {
       throw new NotFoundException('Room token unavailable');
     }
+    this.clearLegacyRoomSessionCookies(response, request.headers.cookie);
     this.setRoomSessionCookie(response, id, launch.userId);
     return { telegramId: launch.userId, roomToken };
   }
@@ -124,6 +126,7 @@ export class RoomController {
     const telegramId = existing?.userId
       || dto?.telegramId
       || this.appService.createAnonymousRoomUserId();
+    this.clearLegacyRoomSessionCookies(response, request.headers.cookie);
     this.setRoomSessionCookie(response, id, telegramId);
     return {
       telegramId,
@@ -157,10 +160,30 @@ export class RoomController {
         httpOnly: true,
         secure: true,
         sameSite: 'lax',
-        path: '/',
+        path: `/api/room/${encodeURIComponent(roomId)}`,
         maxAge: 365 * 24 * 60 * 60 * 1000,
       },
     );
+  }
+
+  private clearLegacyRoomSessionCookies(
+    response: Response,
+    cookieHeader: string | undefined,
+  ): void {
+    const legacyCookieNames = new Set(
+      String(cookieHeader || '')
+        .split(';')
+        .map((part) => part.trim().split('=', 1)[0])
+        .filter((name) => /^ide_room_session_[a-f0-9]{20}$/.test(name)),
+    );
+    for (const name of legacyCookieNames) {
+      response.clearCookie(name, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'lax',
+        path: '/',
+      });
+    }
   }
 
   @ApiOperation({ summary: 'Get all rooms by telegram id ' })
