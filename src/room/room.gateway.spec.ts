@@ -1,5 +1,10 @@
-import { RoomGateway } from './room.gateway';
+import {
+  RoomGateway,
+  SOCKET_PING_INTERVAL_MS,
+  SOCKET_PING_TIMEOUT_MS,
+} from './room.gateway';
 import * as Y from 'yjs';
+import { socketMetrics } from '../socket-metrics';
 
 const createRoom = (overrides: Record<string, unknown> = {}) =>
   ({
@@ -17,6 +22,7 @@ const createRoom = (overrides: Record<string, unknown> = {}) =>
 const createClient = (id: string) =>
   ({
     id,
+    conn: { transport: { name: 'websocket' }, readyState: 'closed' },
     join: jest.fn().mockResolvedValue(undefined),
     leave: jest.fn().mockResolvedValue(undefined),
     disconnect: jest.fn(),
@@ -57,11 +63,18 @@ const memberUpdates = (roomEmit: jest.Mock) =>
 describe('RoomGateway membership sync', () => {
   beforeEach(() => {
     jest.useFakeTimers();
+    socketMetrics.reset();
   });
 
   afterEach(() => {
     jest.clearAllTimers();
     jest.useRealTimers();
+  });
+
+  it('keeps the mobile heartbeat window above the ping interval', () => {
+    expect(SOCKET_PING_INTERVAL_MS).toBeGreaterThanOrEqual(25_000);
+    expect(SOCKET_PING_TIMEOUT_MS).toBeGreaterThanOrEqual(60_000);
+    expect(SOCKET_PING_TIMEOUT_MS).toBeGreaterThan(SOCKET_PING_INTERVAL_MS);
   });
 
   it('broadcasts all joined members without server-side isYourself', async () => {
@@ -119,6 +132,86 @@ describe('RoomGateway membership sync', () => {
     expect(roomService.editRoom).toHaveBeenCalledWith(
       'room-1',
       expect.objectContaining({ telegramId: 'teacher-1', language: 'bash' }),
+    );
+  });
+
+  it('classifies a hidden-tab disconnect separately from ping timeouts', async () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket-hidden');
+
+    await gateway.handleJoinRoom(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-hidden',
+      },
+      client,
+    );
+    expect(
+      gateway.handleClientLifecycle(client, {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-hidden',
+        state: 'hidden',
+      }),
+    ).toEqual({ ok: true });
+
+    await gateway.handleDisconnect(client);
+
+    expect(socketMetrics.render()).toContain(
+      'ide_socket_disconnect_total{reason="hidden_tab"} 1',
+    );
+    expect(socketMetrics.render()).not.toContain('reason="ping_timeout"');
+  });
+
+  it('rejects hidden lifecycle claims from a socket outside the room', () => {
+    const { gateway } = createGateway();
+    const client = createClient('socket-outsider');
+
+    expect(
+      gateway.handleClientLifecycle(client, {
+        telegramId: 'outsider',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-outsider',
+        state: 'hidden',
+      }),
+    ).toEqual({ ok: false });
+  });
+
+  it('measures a successful reconnect for the same browser instance', async () => {
+    const { gateway } = createGateway();
+    const first = createClient('socket-first');
+    const second = createClient('socket-second');
+
+    await gateway.handleJoinRoom(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-stable',
+      },
+      first,
+    );
+    (gateway as any).disconnectReasons.set(first.id, 'ping timeout');
+    await gateway.handleDisconnect(first);
+    jest.advanceTimersByTime(2_000);
+    await gateway.handleJoinRoom(
+      {
+        telegramId: 'teacher-1',
+        roomId: 'room-1',
+        clientInstanceId: 'browser-stable',
+      },
+      second,
+    );
+
+    const rendered = socketMetrics.render();
+    expect(rendered).toContain(
+      'ide_socket_disconnect_total{reason="ping_timeout"} 1',
+    );
+    expect(rendered).toContain(
+      'ide_socket_reconnect_success_total{reason="ping_timeout"} 1',
+    );
+    expect(rendered).toContain(
+      'ide_socket_reconnect_duration_seconds_count{reason="ping_timeout"} 1',
     );
   });
 

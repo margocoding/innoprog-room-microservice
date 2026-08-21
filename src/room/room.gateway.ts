@@ -17,12 +17,17 @@ import { BeforeApplicationShutdown, Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
 import { Language } from '@prisma/client';
 import { createHmac, randomBytes } from 'node:crypto';
+import { socketMetrics } from '../socket-metrics';
 
 interface JoinPayload {
   telegramId: string;
   username?: string;
   roomId: string;
   clientInstanceId?: string;
+}
+
+interface ClientLifecyclePayload extends JoinPayload {
+  state: 'hidden';
 }
 
 interface EditMember extends JoinPayload {
@@ -135,6 +140,22 @@ function getSocketCorsAllowedOrigins(): Set<string> {
 
 const socketCorsAllowedOrigins = getSocketCorsAllowedOrigins();
 
+const positiveIntegerSetting = (name: string, fallback: number): number => {
+  const parsed = Number(process.env[name] ?? fallback);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : fallback;
+};
+
+export const SOCKET_PING_INTERVAL_MS = positiveIntegerSetting(
+  'SOCKET_IO_PING_INTERVAL_MS',
+  25_000,
+);
+export const SOCKET_PING_TIMEOUT_MS = positiveIntegerSetting(
+  'SOCKET_IO_PING_TIMEOUT_MS',
+  60_000,
+);
+const RECONNECT_TRACKING_TTL_MS = 10 * 60_000;
+const RECONNECT_TRACKING_MAX_ENTRIES = 10_000;
+
 function isSocketCorsOriginAllowed(origin?: string): boolean {
   if (!origin) {
     return true;
@@ -171,7 +192,8 @@ function applyYjsUpdate(doc: Y.Doc, update: Uint8Array): Uint8Array | null {
     methods: ['GET', 'POST'],
     credentials: true,
   },
-  pingTimeout: 30000,
+  pingInterval: SOCKET_PING_INTERVAL_MS,
+  pingTimeout: SOCKET_PING_TIMEOUT_MS,
 })
 @UseGuards(AuthRoomGuard)
 export class RoomGateway
@@ -221,6 +243,11 @@ export class RoomGateway
   private lastPersistedSnapshots = new Map<string, string | null>();
   private socketMemberships = new Map<string, Map<string, SocketMembership>>();
   private disconnectReasons = new Map<string, string>();
+  private intentionalDisconnectReasons = new Map<string, 'hidden_tab'>();
+  private recentDisconnects = new Map<
+    string,
+    { disconnectedAt: number; reason: string }
+  >();
 
   constructor(private readonly roomService: RoomService) {}
 
@@ -244,6 +271,70 @@ export class RoomGateway
       .update(value)
       .digest('hex')
       .slice(0, 16);
+  }
+
+  private reconnectKey(roomId: string, clientInstanceId?: string): string | null {
+    if (!clientInstanceId) return null;
+    return `${roomId}:${clientInstanceId}`;
+  }
+
+  private disconnectReasonCategory(clientId: string, reason?: string): string {
+    const intentional = this.intentionalDisconnectReasons.get(clientId);
+    if (intentional) return intentional;
+    const normalized = String(reason ?? '').toLowerCase();
+    if (normalized.includes('ping timeout')) return 'ping_timeout';
+    if (normalized.includes('transport')) return 'transport_close';
+    if (normalized.includes('client namespace disconnect')) {
+      return 'client_disconnect';
+    }
+    if (normalized.includes('server namespace disconnect')) {
+      return 'server_disconnect';
+    }
+    return 'other';
+  }
+
+  private rememberReconnectCandidate(
+    roomId: string,
+    clientInstanceId: string | undefined,
+    reason: string,
+    now = Date.now(),
+  ): void {
+    const key = this.reconnectKey(roomId, clientInstanceId);
+    if (!key) return;
+    for (const [candidateKey, candidate] of this.recentDisconnects) {
+      if (now - candidate.disconnectedAt > RECONNECT_TRACKING_TTL_MS) {
+        this.recentDisconnects.delete(candidateKey);
+      }
+    }
+    while (this.recentDisconnects.size >= RECONNECT_TRACKING_MAX_ENTRIES) {
+      const oldestKey = this.recentDisconnects.keys().next().value as
+        | string
+        | undefined;
+      if (!oldestKey) break;
+      this.recentDisconnects.delete(oldestKey);
+    }
+    this.recentDisconnects.set(key, { disconnectedAt: now, reason });
+  }
+
+  private recordReconnectSuccess(
+    roomId: string,
+    clientInstanceId?: string,
+    now = Date.now(),
+  ): void {
+    const key = this.reconnectKey(roomId, clientInstanceId);
+    if (!key) return;
+    const previous = this.recentDisconnects.get(key);
+    if (!previous) return;
+    this.recentDisconnects.delete(key);
+    if (now - previous.disconnectedAt > RECONNECT_TRACKING_TTL_MS) return;
+    socketMetrics.increment('ide_socket_reconnect_success_total', {
+      reason: previous.reason,
+    });
+    socketMetrics.observe(
+      'ide_socket_reconnect_duration_seconds',
+      (now - previous.disconnectedAt) / 1_000,
+      { reason: previous.reason },
+    );
   }
 
   private normalizeBinaryUpdate(value: unknown): Uint8Array {
@@ -546,6 +637,7 @@ export class RoomGateway
     }
 
     this.rememberSocketMembership(client.id, activeRoom.id, telegramId);
+    this.recordReconnectSuccess(activeRoom.id, clientInstanceId);
     this.logger.log(
       JSON.stringify({
         event: sameIdentityMembers.length > 0 ? 'room_rejoin' : 'room_join',
@@ -1062,23 +1154,55 @@ export class RoomGateway
     });
   }
 
+  @SubscribeMessage('client-lifecycle') handleClientLifecycle(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: ClientLifecyclePayload,
+  ) {
+    if (
+      data.state !== 'hidden' ||
+      !this.isCurrentSocketMember(client, data.roomId, data.telegramId)
+    ) {
+      return { ok: false };
+    }
+    this.intentionalDisconnectReasons.set(client.id, 'hidden_tab');
+    return { ok: true };
+  }
+
   async handleDisconnect(client: Socket) {
     const memberships = Array.from(
       this.socketMemberships.get(client.id)?.values() ?? [],
     );
+    const rawReason =
+      this.disconnectReasons.get(client.id) || client.conn?.readyState;
+    const reasonCategory = this.disconnectReasonCategory(client.id, rawReason);
     for (const membership of memberships) {
+      const activeRoom = this.activeRooms.find(
+        (room) => room.id === membership.roomId,
+      );
+      const member = activeRoom?.members.find(
+        (item) => item.clientId === client.id,
+      );
+      this.rememberReconnectCandidate(
+        membership.roomId,
+        member?.clientInstanceId,
+        reasonCategory,
+      );
+      socketMetrics.increment('ide_socket_disconnect_total', {
+        reason: reasonCategory,
+      });
       this.logger.log(
         JSON.stringify({
           event: 'socket_disconnect',
           roomId: membership.roomId,
           userHash: this.userHash(membership.telegramId),
           transport: client.conn?.transport?.name,
-          reason:
-            this.disconnectReasons.get(client.id) || client.conn?.readyState,
+          reason: rawReason,
+          reasonCategory,
         }),
       );
     }
     this.disconnectReasons.delete(client.id);
+    this.intentionalDisconnectReasons.delete(client.id);
     await this.markSocketLeft(client);
   }
 
@@ -1349,6 +1473,9 @@ export class RoomGateway
   }
 
   handleConnection(client: Socket) {
+    socketMetrics.increment('ide_socket_connection_total', {
+      transport: client.conn?.transport?.name || 'unknown',
+    });
     client.once('disconnect', (reason) => {
       this.disconnectReasons.set(client.id, reason);
     });

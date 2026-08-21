@@ -4,10 +4,11 @@ import { AppService } from './app.service';
 import { RoomLaunchCodeStore } from './room-launch-code.store';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthController } from './health.controller';
+import { MetricsController } from './metrics.controller';
 
 @Module({
   imports: [RoomModule, PrismaModule],
-  controllers: [HealthController],
+  controllers: [HealthController, MetricsController],
   providers: [AppService, RoomLaunchCodeStore],
   exports: [AppService]
 })
