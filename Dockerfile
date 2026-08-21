@@ -12,7 +12,7 @@ COPY . .
 
 RUN yarn prisma generate
 
-RUN yarn run build
+RUN rm -rf dist *.tsbuildinfo && yarn run build
 
 # --- Production Stage ---
 FROM node:22-alpine AS production
