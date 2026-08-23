@@ -147,14 +147,14 @@ describe('RoomGateway membership sync', () => {
       },
       client,
     );
-    expect(
+    await expect(
       gateway.handleClientLifecycle(client, {
         telegramId: 'teacher-1',
         roomId: 'room-1',
         clientInstanceId: 'browser-hidden',
         state: 'hidden',
       }),
-    ).toEqual({ ok: true });
+    ).resolves.toEqual({ ok: true, persisted: true });
 
     await gateway.handleDisconnect(client);
 
@@ -164,18 +164,18 @@ describe('RoomGateway membership sync', () => {
     expect(socketMetrics.render()).not.toContain('reason="ping_timeout"');
   });
 
-  it('rejects hidden lifecycle claims from a socket outside the room', () => {
+  it('rejects hidden lifecycle claims from a socket outside the room', async () => {
     const { gateway } = createGateway();
     const client = createClient('socket-outsider');
 
-    expect(
+    await expect(
       gateway.handleClientLifecycle(client, {
         telegramId: 'outsider',
         roomId: 'room-1',
         clientInstanceId: 'browser-outsider',
         state: 'hidden',
       }),
-    ).toEqual({ ok: false });
+    ).resolves.toEqual({ ok: false });
   });
 
   it('measures a successful reconnect for the same browser instance', async () => {

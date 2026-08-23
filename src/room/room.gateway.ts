@@ -1154,7 +1154,7 @@ export class RoomGateway
     });
   }
 
-  @SubscribeMessage('client-lifecycle') handleClientLifecycle(
+  @SubscribeMessage('client-lifecycle') async handleClientLifecycle(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: ClientLifecyclePayload,
   ) {
@@ -1165,7 +1165,34 @@ export class RoomGateway
       return { ok: false };
     }
     this.intentionalDisconnectReasons.set(client.id, 'hidden_tab');
-    return { ok: true };
+    try {
+      await this.flushRoomSnapshot(data.roomId, { force: true });
+      this.logger.log(
+        JSON.stringify({
+          event: 'room_suspended',
+          roomId: data.roomId,
+          telegramId: data.telegramId,
+          clientInstanceId: data.clientInstanceId,
+          reason: 'hidden_tab',
+        }),
+      );
+      return { ok: true, persisted: true };
+    } catch (error) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'room_suspend_failed',
+          roomId: data.roomId,
+          telegramId: data.telegramId,
+          clientInstanceId: data.clientInstanceId,
+          reason: error instanceof Error ? error.message : 'unknown_error',
+        }),
+      );
+      return {
+        ok: false,
+        persisted: false,
+        error: 'Не удалось сохранить состояние комнаты',
+      };
+    }
   }
 
   async handleDisconnect(client: Socket) {
