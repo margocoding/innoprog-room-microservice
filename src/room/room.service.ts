@@ -1,3 +1,4 @@
+import { Language } from '@prisma/client';
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { fillDto } from 'helpers/fill-dto/fill-dto';
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -66,6 +67,18 @@ export class RoomService {
       this.logger.error(`Cannot edit the room: ${e}`);
       throw new NotFoundException('Room not found');
     }
+  }
+
+  async changeLanguage(id: string, telegramId: string, language: Language): Promise<RoomRdo> {
+    const room = await this.prisma.room.update({
+      where: {
+        id,
+        completed: false,
+        OR: [{ teacher: telegramId }, { students: { has: telegramId } }],
+      },
+      data: { language },
+    });
+    return fillDto(RoomRdo, room);
   }
 
   async deleteRoom(

@@ -92,6 +92,19 @@ describe('RoomService', () => {
     });
   });
 
+  it('updates only the language for a member of an unfinished room', async () => {
+    prisma.room.update.mockResolvedValue(room({ language: 'js' }));
+    const result = await service.changeLanguage('room-1', 'student-1', 'js');
+    expect(prisma.room.update).toHaveBeenCalledWith({
+      where: {
+        id: 'room-1', completed: false,
+        OR: [{ teacher: 'student-1' }, { students: { has: 'student-1' } }],
+      },
+      data: { language: 'js' },
+    });
+    expect(result.language).toBe('js');
+  });
+
   it('edits supplied fields and preserves omitted permissions', async () => {
     prisma.room.findUnique.mockResolvedValue(room());
     prisma.room.update.mockResolvedValue(room({ language: 'javascript' }));

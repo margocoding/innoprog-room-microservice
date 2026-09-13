@@ -43,6 +43,7 @@ const createGateway = (room = createRoom()) => {
     getRoomSnapshot: jest.fn().mockResolvedValue(null),
     saveRoomSnapshot: jest.fn().mockResolvedValue(undefined),
     editRoom: jest.fn().mockResolvedValue(room),
+    changeLanguage: jest.fn().mockResolvedValue({ ...room, language: 'js' }),
     completeRoom: jest.fn().mockResolvedValue({ success: true }),
   };
 
@@ -133,6 +134,42 @@ describe('RoomGateway membership sync', () => {
       'room-1',
       expect.objectContaining({ telegramId: 'teacher-1', language: 'bash' }),
     );
+  });
+
+  it('persists and broadcasts language changes from a joined student', async () => {
+    const { gateway, roomService, roomEmit } = createGateway();
+    const student = createClient('student-socket');
+    await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'student-1' }, student);
+    await gateway.handleEditRoom(student, {
+      roomId: 'room-1', telegramId: 'student-1', language: 'js',
+    } as any);
+    expect(roomService.changeLanguage).toHaveBeenCalledWith('room-1', 'student-1', 'js');
+    expect(roomService.editRoom).not.toHaveBeenCalled();
+    expect(roomEmit).toHaveBeenCalledWith('room-edited', expect.objectContaining({ language: 'js' }));
+  });
+
+  it.each([
+    { studentEditCodeEnabled: true },
+    { studentCursorEnabled: true },
+    { studentSelectionEnabled: true },
+    { taskId: 'other-task' },
+  ])('rejects student changes to owner settings: %j', async (settings) => {
+    const { gateway, roomService } = createGateway();
+    const student = createClient('student-socket');
+    await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'student-1' }, student);
+    await gateway.handleEditRoom(student, {
+      roomId: 'room-1', telegramId: 'student-1', language: 'js', ...settings,
+    } as any);
+    expect(roomService.changeLanguage).not.toHaveBeenCalled();
+    expect(roomService.editRoom).not.toHaveBeenCalled();
+  });
+
+  it('rejects language changes from a socket that has not joined', async () => {
+    const { gateway, roomService } = createGateway();
+    await gateway.handleEditRoom(createClient('outsider'), {
+      roomId: 'room-1', telegramId: 'student-1', language: 'js',
+    } as any);
+    expect(roomService.changeLanguage).not.toHaveBeenCalled();
   });
 
   it('classifies a hidden-tab disconnect separately from ping timeouts', async () => {
@@ -964,8 +1001,8 @@ describe('RoomGateway events', () => {
       roomId: 'room-1',
       telegramId: 'teacher-1',
     } as any);
-    expect(client.emit).toHaveBeenCalledWith('error', {
-      message: 'Комната не найдена',
+    expect(client.emit).toHaveBeenCalledWith('edit-room:error', {
+      message: 'Недостаточно прав для изменения настроек комнаты',
     });
   });
 

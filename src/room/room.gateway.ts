@@ -864,7 +864,7 @@ export class RoomGateway
   ) {
     const room = await this.roomService.getRoom(data.roomId);
 
-    if (!room || room.teacher !== data.telegramId) {
+    if (!room) {
       client.emit('error', { message: 'Комната не найдена' });
       return;
     }
@@ -877,6 +877,25 @@ export class RoomGateway
       client.emit('edit-room:error', {
         message: 'Неподдерживаемый язык программирования',
       });
+      return;
+    }
+
+    if (room.teacher !== data.telegramId) {
+      if (
+        !this.isCurrentSocketMember(client, room.id, data.telegramId) ||
+        data.language === undefined ||
+        data.taskId !== undefined ||
+        data.studentCursorEnabled !== undefined ||
+        data.studentEditCodeEnabled !== undefined ||
+        data.studentSelectionEnabled !== undefined
+      ) {
+        client.emit('edit-room:error', { message: 'Недостаточно прав для изменения настроек комнаты' });
+        return;
+      }
+      const updatedRoom = await this.roomService.changeLanguage(
+        room.id, data.telegramId, data.language,
+      );
+      this.server.to(room.id).emit('room-edited', fillDto(RoomRdo, updatedRoom));
       return;
     }
 
