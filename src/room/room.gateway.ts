@@ -859,7 +859,7 @@ export class RoomGateway
   }
 
   @SubscribeMessage('edit-room') async handleEditRoom(
-    client: Socket,
+    @ConnectedSocket() client: Socket,
     @MessageBody() data: EditPayload,
   ) {
     const room = await this.roomService.getRoom(data.roomId);
