@@ -35,6 +35,8 @@ COPY --from=development /usr/src/app/node_modules/@prisma /usr/src/app/node_modu
 
 COPY --from=development /usr/src/app/dist ./dist
 
+USER 1000:1000
+
 EXPOSE 3000
 
-CMD ["yarn", "run", "start:prod"]
+CMD ["node", "dist/src/main"]
