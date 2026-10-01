@@ -19,6 +19,7 @@
     "test": "jest",
     "test:unit": "jest --runInBand",
     "test:contracts": "jest src/room/auth-room.guard.spec.ts src/room/language.contract.spec.ts --runInBand",
+    "test:docker-context": "node scripts/test-docker-context.mjs",
     "test:integration": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage --runInBand",
