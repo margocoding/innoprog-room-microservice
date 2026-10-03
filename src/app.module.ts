@@ -5,10 +5,11 @@ import { RoomLaunchCodeStore } from './room-launch-code.store';
 import { PrismaModule } from './prisma/prisma.module';
 import { HealthController } from './health.controller';
 import { MetricsController } from './metrics.controller';
+import { IdeStartupDiagnosticsController } from './ide-startup-diagnostics.controller';
 
 @Module({
   imports: [RoomModule, PrismaModule],
-  controllers: [HealthController, MetricsController],
+  controllers: [HealthController, MetricsController, IdeStartupDiagnosticsController],
   providers: [AppService, RoomLaunchCodeStore],
   exports: [AppService]
 })
