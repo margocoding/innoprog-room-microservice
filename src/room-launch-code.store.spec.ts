@@ -30,6 +30,14 @@ describe('RoomLaunchCodeStore', () => {
     (createClient as jest.Mock).mockReturnValue(client);
   });
 
+  it('claims creation nonces atomically with expiry and rejects replay', async () => {
+    client.set.mockResolvedValueOnce('OK').mockResolvedValueOnce(null);
+    const store = new RoomLaunchCodeStore();
+    expect(await store.claimCreationNonce('a'.repeat(32))).toBe(true);
+    expect(await store.claimCreationNonce('a'.repeat(32))).toBe(false);
+    expect(client.set).toHaveBeenCalledWith(`innoprog:ide-room:create:${'a'.repeat(32)}`, 'used', { NX: true, EX: 180 });
+  });
+
   it('lets the same browser safely retry a redeemed launch code', async () => {
     client.eval
       .mockResolvedValueOnce(JSON.stringify({ roomId: 'room-1', userId: 'teacher-1' }))

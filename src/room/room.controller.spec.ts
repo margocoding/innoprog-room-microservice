@@ -2,10 +2,11 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AppService } from 'src/app.service';
 import { RoomService } from './room.service';
 import { RoomController } from './room.controller';
+import { AuthRoomGuard } from './auth-room.guard';
 
 describe('RoomController', () => {
   let controller: RoomController;
-  let roomService: { getRoom: jest.Mock; createRoom: jest.Mock; deleteRoom: jest.Mock };
+  let roomService: { getRoom: jest.Mock; createRoom: jest.Mock; deleteRoom: jest.Mock; getRooms: jest.Mock };
   let appService: {
     createAnonymousRoomUserId: jest.Mock;
     createRoomToken: jest.Mock;
@@ -14,6 +15,7 @@ describe('RoomController', () => {
     createRoomBrowserSession: jest.Mock;
     getRoomSessionCookieName: jest.Mock;
     verifyRoomBrowserSession: jest.Mock;
+    verifyRoomToken: jest.Mock;
   };
   let response: { cookie: jest.Mock; clearCookie: jest.Mock };
 
@@ -22,6 +24,7 @@ describe('RoomController', () => {
       getRoom: jest.fn().mockResolvedValue({ id: 'room-1', teacher: 'teacher-1' }),
       createRoom: jest.fn().mockResolvedValue({ id: 'room-1', teacher: 'teacher-1' }),
       deleteRoom: jest.fn().mockResolvedValue({ success: true }),
+      getRooms: jest.fn().mockResolvedValue({ rooms: [], total: 0 }),
     };
     appService = {
       createAnonymousRoomUserId: jest.fn(() => 'i999999'),
@@ -33,6 +36,7 @@ describe('RoomController', () => {
       createRoomBrowserSession: jest.fn(() => 'browser-session-token'),
       getRoomSessionCookieName: jest.fn(() => 'ide_room_session_hash'),
       verifyRoomBrowserSession: jest.fn(),
+      verifyRoomToken: jest.fn(),
     };
     response = { cookie: jest.fn(), clearCookie: jest.fn() };
 
@@ -55,6 +59,68 @@ describe('RoomController', () => {
 
   it('should be defined', () => {
     expect(controller).toBeDefined();
+  });
+
+  it('rejects global room enumeration using a chosen guest identifier', async () => {
+    appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId: 'i123456' });
+    await expect(controller.getRooms('i123456', {} as any, { headers: { 'x-room-token': 'signed' } } as any)).rejects.toMatchObject({ status: 403 });
+    expect(roomService.getRooms).not.toHaveBeenCalled();
+    expect(roomService.getRoom).not.toHaveBeenCalled();
+  });
+
+  it('blocks discovery through an actual signed guest token and ignores chosen guest ids', async () => {
+    const previousSecret = process.env.ROOM_TOKEN_SECRET;
+    process.env.ROOM_TOKEN_SECRET = 'test-only-room-discovery-secret';
+    try {
+      const realService = new AppService();
+      const actualController = new RoomController(roomService as any, realService);
+      const session = await actualController.createAnonymousRoomToken(
+        'room-1', { telegramId: 'i123456' }, { headers: {} } as any, response as any,
+      );
+      expect(session.telegramId).not.toBe('i123456');
+      const request = { headers: { 'x-room-token': session.roomToken }, params: { telegramId: session.telegramId }, query: {}, body: {} };
+      const guard = new AuthRoomGuard(realService);
+      expect(await guard.canActivate({ getType: () => 'http', switchToHttp: () => ({ getRequest: () => request }) } as any)).toBe(true);
+      await expect(actualController.getRooms(request.params.telegramId, {} as any, request as any)).rejects.toMatchObject({ status: 403 });
+      expect(roomService.getRooms).not.toHaveBeenCalled();
+    } finally {
+      if (previousSecret === undefined) delete process.env.ROOM_TOKEN_SECRET;
+      else process.env.ROOM_TOKEN_SECRET = previousSecret;
+    }
+  });
+
+  it('permits a verified current room teacher to list their rooms', async () => {
+    appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId: '123' });
+    roomService.getRoom.mockResolvedValue({ id: 'room-1', teacher: '123' });
+    await expect(controller.getRooms('123', {} as any, { headers: { 'x-room-token': 'signed' } } as any)).resolves.toEqual({ rooms: [], total: 0 });
+    expect(roomService.getRooms).toHaveBeenCalledWith('123', {});
+  });
+
+  it.each([null, { teacher: '456' }])('rejects listing after room deletion or teacher mismatch %j', async (room) => {
+    appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId: '123' });
+    roomService.getRoom.mockResolvedValue(room);
+    await expect(controller.getRooms('123', {} as any, { headers: { 'x-room-token': 'signed' } } as any)).rejects.toMatchObject({ status: 403 });
+    expect(roomService.getRooms).not.toHaveBeenCalled();
+  });
+
+  it('rejects execution capability without a verified signed token before looking up a room', async () => {
+    await expect(controller.executionAccess('room-1', { headers: {} } as any)).rejects.toMatchObject({ status: 403 });
+    expect(roomService.getRoom).not.toHaveBeenCalled();
+  });
+
+  it.each(['teacher-1', 'i123'])('preserves execution access for verified room member %s', async (userId) => {
+    appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId });
+    roomService.getRoom.mockResolvedValue({ teacher: 'teacher-1', students: ['i123'], completed: true });
+    await expect(controller.executionAccess('room-1', { headers: { 'x-room-token': 'signed' } } as any)).resolves.toEqual({ ok: true });
+    expect(appService.verifyRoomToken).toHaveBeenCalledWith('signed', 'room-1');
+  });
+
+  it('rejects removed rooms and users who have not joined the room', async () => {
+    appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId: 'i999' });
+    roomService.getRoom.mockResolvedValue({ teacher: 'teacher-1', students: ['i123'] });
+    await expect(controller.executionAccess('room-1', { headers: { 'x-room-token': 'signed' } } as any)).rejects.toMatchObject({ status: 403 });
+    roomService.getRoom.mockResolvedValue(null);
+    await expect(controller.executionAccess('room-1', { headers: { 'x-room-token': 'signed' } } as any)).rejects.toMatchObject({ status: 403 });
   });
 
   it('returns a one-time launch code when creating a teacher room', async () => {

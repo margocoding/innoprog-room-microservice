@@ -80,6 +80,19 @@ export class AppService {
         }
     }
 
+    async verifyRoomCreation(body: Buffer, header: string): Promise<boolean> {
+        const match = /^v1\.(\d{1,12})\.([a-f0-9]{32})\.([a-f0-9]{64})$/.exec(header);
+        const configured = process.env.ENCRYPT_TELEGRAM_ID_KEY;
+        if (!match || !configured || body.length > 16384) return false;
+        const key = Buffer.from(configured, 'base64');
+        const timestamp = Number(match[1]);
+        if (key.length !== 32 || !Number.isSafeInteger(timestamp) || Math.abs(Math.floor(Date.now() / 1000) - timestamp) > 60) return false;
+        const message = `innoprog:room-create:v1\n${match[1]}\n${match[2]}\n${crypto.createHash('sha256').update(body).digest('hex')}`;
+        const signature = crypto.createHmac('sha256', key).update(message).digest();
+        if (!crypto.timingSafeEqual(signature, Buffer.from(match[3], 'hex'))) return false;
+        return this.roomLaunchCodeStore.claimCreationNonce(match[2]);
+    }
+
     createRoomLaunchCode(roomId: string, userId: string): Promise<string> {
         return this.roomLaunchCodeStore.create({ roomId, userId });
     }

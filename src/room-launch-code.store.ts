@@ -123,6 +123,11 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
     return (await client.ping()) === 'PONG';
   }
 
+  async claimCreationNonce(nonce: string): Promise<boolean> {
+    const client = await this.getClient();
+    return (await client.set(`innoprog:ide-room:create:${nonce}`, 'used', { NX: true, EX: 180 })) === 'OK';
+  }
+
   async onModuleDestroy(): Promise<void> {
     if (this.client?.isOpen) {
       await this.client.quit();

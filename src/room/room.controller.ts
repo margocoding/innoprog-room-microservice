@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   Logger,
   NotFoundException,
@@ -29,6 +30,7 @@ import { GetRoomsDto } from './dto/get-rooms-dto';
 import { RoomRdo } from './rdo/room-rdo';
 import { RoomService } from './room.service';
 import { AuthRoomGuard } from './auth-room.guard';
+import { AuthRoomCreateGuard } from './auth-room-create.guard';
 import { DeleteRoomDto } from './dto/delete-room-dto';
 import { AppService } from 'src/app.service';
 import { CreateAnonymousRoomTokenDto } from './dto/create-anonymous-room-token-dto';
@@ -45,9 +47,25 @@ export class RoomController {
     private readonly appService: AppService,
   ) { }
 
+  @Get('/:id/execution-access')
+  async executionAccess(@Param('id') id: string, @Req() request: Request): Promise<{ ok: true }> {
+    const raw = request.headers['x-room-token'];
+    const token = typeof raw === 'string' && raw.length <= 4096 ? raw : '';
+    // Always enforce signed room access, regardless of legacy join settings.
+    const claims = this.appService.verifyRoomToken(token, id);
+    if (!claims) throw new ForbiddenException('Invalid room access');
+    const room = await this.roomService.getRoom(id);
+    if (!room || (room.teacher !== claims.userId && !room.students.includes(claims.userId))) {
+      throw new ForbiddenException('Room membership required');
+    }
+    // Preserve existing access to completed lesson rooms; deleting the room
+    // revokes this capability immediately without distributing its signing key.
+    return { ok: true };
+  }
+
   @ApiOperation({ summary: 'Create room' })
   @ApiResponse({ status: 200, type: RoomRdo })
-  @UseGuards(AuthRoomGuard)
+  @UseGuards(AuthRoomCreateGuard)
   @Post('/')
   async createRoom(@Body() dto: CreateRoomDto): Promise<RoomRdo> {
     const room = await this.roomService.createRoom(dto);
@@ -192,7 +210,26 @@ export class RoomController {
   async getRooms(
     @Param('telegramId') telegramId: string,
     @Query() dto: GetRoomsDto,
+    @Req() request: Request,
   ): Promise<{ rooms: RoomRdo[]; total: number }> {
+    const principal = (request as Request & { roomListingPrincipal?: string }).roomListingPrincipal;
+    if (principal === telegramId && /^-?\d+$/.test(principal)) {
+      return await this.roomService.getRooms(principal, dto);
+    }
+    const raw = request.headers['x-room-token'] || request.body?.roomToken;
+    const token = Array.isArray(raw) ? raw[0] : raw;
+    const claims = typeof token === 'string' && token.length <= 4096
+      ? this.appService.verifyRoomToken(token)
+      : undefined;
+    // Guest identifiers can be selected when joining. A room guest token
+    // proves access to that room, not a global identity for enumeration.
+    if (!claims || claims.userId !== telegramId || !/^-?\d+$/.test(claims.userId)) {
+      throw new ForbiddenException('Verified teacher identity required');
+    }
+    const room = await this.roomService.getRoom(claims.roomId);
+    if (!room || room.teacher !== claims.userId) {
+      throw new ForbiddenException('Verified room teacher required');
+    }
     return await this.roomService.getRooms(telegramId, dto);
   }
 

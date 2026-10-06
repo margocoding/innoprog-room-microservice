@@ -118,18 +118,17 @@ describe('AuthRoomGuard', () => {
     expect(await guard.canActivate(createHttpContext(request))).toBe(false);
   });
 
-  it('preserves encrypted dashboard credentials without accepting bare IDs', async () => {
+  it('rejects encrypted dashboard identities without current platform authentication', async () => {
     const appService = createAppServiceMock({ decryptTelegramId: jest.fn(() => '42') });
     const request = { method: 'GET', headers: {}, params: { telegramId: 'encrypted-credential' }, query: {}, body: {} };
-    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(true);
-    expect(request.params.telegramId).toBe('42');
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(false);
+    expect(appService.decryptTelegramId).not.toHaveBeenCalled();
   });
 
-  it('creates anonymous teachers with a fresh server identity, not a chosen ID', async () => {
+  it('does not grant room creation through the old generic guard', async () => {
     const appService = createAppServiceMock();
     const request = { method: 'POST', headers: {}, params: {}, query: {}, body: { telegramId: 'i123456' } };
-    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(true);
-    expect(request.body.telegramId).toBe('i999999');
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(false);
   });
 
   it('does not fall back to legacy credentials when platform authentication fails', async () => {
@@ -137,6 +136,11 @@ describe('AuthRoomGuard', () => {
     const request = { method: 'GET', headers: { authorization: 'Bearer revoked' }, params: { telegramId: 'encrypted' }, query: {}, body: {} };
     expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(false);
     expect(appService.decryptTelegramId).not.toHaveBeenCalled();
+  });
+
+  it.each([{ query: { roomId: 'invented-room' }, body: {} }, { query: {}, body: { id: 'invented-room' } }])('rejects unsigned listing with injected context %j', async ({ query, body }) => {
+    const appService = createAppServiceMock();
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext({ query, body, params: { telegramId: '999' }, headers: {} }))).toBe(false);
   });
 
   it('rejects room websocket access without token when strict mode is enabled', async () => {

@@ -148,10 +148,10 @@ export class AuthRoomGuard implements CanActivate {
                     request.res?.status(403).json({ message: 'Неверная или истекшая ссылка комнаты' });
                     return false;
                 }
-                if (!expectedRoomId && request.params?.telegramId
+                if (request.params?.telegramId
                     && request.params.telegramId !== payload.userId) return false;
                 telegramId = payload.userId;
-            } else if (!expectedRoomId) {
+            } else if (request.params?.telegramId || !expectedRoomId) {
                 // Room creation and the global list have no room ID. A number
                 // is an identifier, never proof of the principal's identity.
                 const authorization = firstString(request.headers?.authorization);
@@ -166,13 +166,7 @@ export class AuthRoomGuard implements CanActivate {
                         return false;
                     }
                     telegramId = principal;
-                } else if (!authorization && supplied && !/^i?\d+$/.test(supplied)) {
-                    // Existing trusted bot/schedule callers send an encrypted
-                    // identity. Preserve that credential during rollout.
-                    telegramId = this.appService.decryptTelegramId(supplied);
-                } else if (!authorization && request.method === 'POST'
-                    && (!supplied || /^i\d+$/.test(supplied))) {
-                    telegramId = this.appService.createAnonymousRoomUserId();
+                    (request as Request & { roomListingPrincipal?: string }).roomListingPrincipal = principal;
                 }
                 if (!this.isValidTelegramId(telegramId)) return false;
             } else {

@@ -23,6 +23,22 @@ describe('AppService room tokens', () => {
         process.env = originalEnv;
     });
 
+    it('accepts the Python signer golden vector exactly once and rejects body tampering', async () => {
+        process.env.ENCRYPT_TELEGRAM_ID_KEY = Buffer.alloc(32, '0').toString('base64');
+        const store = { claimCreationNonce: jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false) };
+        const service = new AppService(store as any);
+        const body = Buffer.from('{"telegramId":"enc-77","username":"Артемий"}');
+        const header = 'v1.1700000000.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.7db5d466536933740e3dc1b15a088f10d7459eb8fef926f96c40d046d505365d';
+        expect(await service.verifyRoomCreation(Buffer.from('{"telegramId":"enc-88"}'), header)).toBe(false);
+        expect(store.claimCreationNonce).not.toHaveBeenCalled();
+        expect(await service.verifyRoomCreation(body, header)).toBe(true);
+        expect(await service.verifyRoomCreation(body, header)).toBe(false);
+        expect(store.claimCreationNonce).toHaveBeenCalledWith('a'.repeat(32));
+        jest.spyOn(Date, 'now').mockReturnValue(fixedNow + 61000);
+        expect(await service.verifyRoomCreation(body, header)).toBe(false);
+        expect(await service.verifyRoomCreation(body, 'v1.malformed')).toBe(false);
+    });
+
     it('creates room tokens that live for one hour by default', () => {
         delete process.env.ROOM_TOKEN_TTL_SECONDS;
         const service = new AppService();
