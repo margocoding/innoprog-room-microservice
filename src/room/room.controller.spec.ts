@@ -96,6 +96,16 @@ describe('RoomController', () => {
     expect(roomService.getRooms).toHaveBeenCalledWith('123', {});
   });
 
+  it('preserves platform-authenticated dashboard listing through the actual guard', async () => {
+    const service = { ...appService, resolvePlatformPrincipal: jest.fn(async () => '123') };
+    const request = { method: 'GET', headers: { authorization: 'Bearer verified-platform-session' }, params: { telegramId: '123' }, query: {}, body: {} };
+    const guard = new AuthRoomGuard(service as any);
+    expect(await guard.canActivate({ getType: () => 'http', switchToHttp: () => ({ getRequest: () => request }) } as any)).toBe(true);
+    await expect(controller.getRooms('123', {} as any, request as any)).resolves.toEqual({ rooms: [], total: 0 });
+    expect(roomService.getRooms).toHaveBeenCalledWith('123', {});
+    expect(roomService.getRoom).not.toHaveBeenCalled();
+  });
+
   it.each([null, { teacher: '456' }])('rejects listing after room deletion or teacher mismatch %j', async (room) => {
     appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId: '123' });
     roomService.getRoom.mockResolvedValue(room);
