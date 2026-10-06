@@ -24,7 +24,7 @@ model Log {
   code      String
   createdAt DateTime @default(now())
   roomId    String
-  room      Room     @relation(references: [id], fields: [roomId])
+  room      Room     @relation(references: [id], fields: [roomId], onDelete: Cascade)
 
   @@map("logs")
 }
