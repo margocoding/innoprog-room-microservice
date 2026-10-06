@@ -143,17 +143,17 @@ describe('RoomController', () => {
     expect(appService.createRoomToken).not.toHaveBeenCalled();
   });
 
-  it('reuses a saved anonymous room user id when issuing a new token', async () => {
+  it('ignores unverified stored anonymous identity when issuing a new token', async () => {
     const result = await controller.createAnonymousRoomToken('room-1', {
       telegramId: 'i123456',
     }, { headers: {} } as any, response as any);
 
     expect(result).toEqual({
-      telegramId: 'i123456',
-      roomToken: 'token-room-1-i123456',
+      telegramId: 'i999999',
+      roomToken: 'token-room-1-i999999',
     });
-    expect(appService.createAnonymousRoomUserId).not.toHaveBeenCalled();
-    expect(appService.createRoomToken).toHaveBeenCalledWith('room-1', 'i123456');
+    expect(appService.createAnonymousRoomUserId).toHaveBeenCalled();
+    expect(appService.createRoomToken).toHaveBeenCalledWith('room-1', 'i999999');
   });
 
   it('creates an anonymous room user id when the client has no saved id', async () => {

@@ -59,7 +59,25 @@ export class AppService {
     }
 
     createAnonymousRoomUserId(): string {
-        return `i${crypto.randomInt(100000, 999999999)}`;
+        return `i${BigInt('0x' + crypto.randomBytes(16).toString('hex')).toString()}`;
+    }
+
+    async resolvePlatformPrincipal(authorization?: string): Promise<string | undefined> {
+        if (!authorization || !/^Bearer \S+$/i.test(authorization)) return undefined;
+        const base = (process.env.PLATFORM_API_BASE || 'https://api.innoprog.ru').replace(/\/$/, '');
+        try {
+            const response = await fetch(`${base}/platform/ide/principal`, {
+                headers: { authorization },
+                redirect: 'error',
+                signal: AbortSignal.timeout(5000),
+            });
+            if (!response.ok) return undefined;
+            const payload = await response.json();
+            const principal = String(payload?.principal_id || '');
+            return /^-?\d+$/.test(principal) ? principal : undefined;
+        } catch {
+            return undefined;
+        }
     }
 
     createRoomLaunchCode(roomId: string, userId: string): Promise<string> {

@@ -32,6 +32,8 @@ const createAppServiceMock = (overrides: Record<string, unknown> = {}) => ({
   isRoomTokenRequired: jest.fn(() => false),
   isLegacyRoomIdAuthAllowed: jest.fn(() => true),
   verifyRoomToken: jest.fn(),
+  resolvePlatformPrincipal: jest.fn(),
+  createAnonymousRoomUserId: jest.fn(() => 'i999999'),
   ...overrides,
 });
 
@@ -91,7 +93,7 @@ describe('AuthRoomGuard', () => {
     expect(appService.decryptTelegramId).not.toHaveBeenCalled();
   });
 
-  it('accepts already decrypted numeric ids for http requests', async () => {
+  it('rejects unauthenticated numeric identities for the global list', async () => {
     const appService = createAppServiceMock();
     const guard = new AuthRoomGuard(appService as any);
     const request = {
@@ -102,8 +104,38 @@ describe('AuthRoomGuard', () => {
 
     const result = await guard.canActivate(createHttpContext(request));
 
-    expect(result).toBe(true);
+    expect(result).toBe(false);
     expect(request.query.telegramId).toBe('429272623');
+    expect(appService.decryptTelegramId).not.toHaveBeenCalled();
+  });
+
+  it('scopes a dashboard listing to the verified platform principal', async () => {
+    const appService = createAppServiceMock({ resolvePlatformPrincipal: jest.fn(async () => '42') });
+    const guard = new AuthRoomGuard(appService as any);
+    const request = { method: 'GET', headers: { authorization: 'Bearer session' }, params: { telegramId: '42' }, query: {}, body: {} };
+    expect(await guard.canActivate(createHttpContext(request))).toBe(true);
+    request.params.telegramId = '99';
+    expect(await guard.canActivate(createHttpContext(request))).toBe(false);
+  });
+
+  it('preserves encrypted dashboard credentials without accepting bare IDs', async () => {
+    const appService = createAppServiceMock({ decryptTelegramId: jest.fn(() => '42') });
+    const request = { method: 'GET', headers: {}, params: { telegramId: 'encrypted-credential' }, query: {}, body: {} };
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(true);
+    expect(request.params.telegramId).toBe('42');
+  });
+
+  it('creates anonymous teachers with a fresh server identity, not a chosen ID', async () => {
+    const appService = createAppServiceMock();
+    const request = { method: 'POST', headers: {}, params: {}, query: {}, body: { telegramId: 'i123456' } };
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(true);
+    expect(request.body.telegramId).toBe('i999999');
+  });
+
+  it('does not fall back to legacy credentials when platform authentication fails', async () => {
+    const appService = createAppServiceMock({ decryptTelegramId: jest.fn(() => '42') });
+    const request = { method: 'GET', headers: { authorization: 'Bearer revoked' }, params: { telegramId: 'encrypted' }, query: {}, body: {} };
+    expect(await new AuthRoomGuard(appService as any).canActivate(createHttpContext(request))).toBe(false);
     expect(appService.decryptTelegramId).not.toHaveBeenCalled();
   });
 

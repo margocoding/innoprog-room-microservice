@@ -124,7 +124,6 @@ export class RoomController {
       ? this.appService.verifyRoomBrowserSession(cookieToken, id)
       : undefined;
     const telegramId = existing?.userId
-      || dto?.telegramId
       || this.appService.createAnonymousRoomUserId();
     this.clearLegacyRoomSessionCookies(response, request.headers.cookie);
     this.setRoomSessionCookie(response, id, telegramId);
@@ -138,7 +137,7 @@ export class RoomController {
     for (const part of String(header || '').split(';')) {
       const [rawName, ...rawValue] = part.trim().split('=');
       if (rawName === name) {
-        return decodeURIComponent(rawValue.join('='));
+        try { return decodeURIComponent(rawValue.join('=')); } catch { return ''; }
       }
     }
     return '';

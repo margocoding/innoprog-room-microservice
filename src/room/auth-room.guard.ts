@@ -148,17 +148,46 @@ export class AuthRoomGuard implements CanActivate {
                     request.res?.status(403).json({ message: 'Неверная или истекшая ссылка комнаты' });
                     return false;
                 }
+                if (!expectedRoomId && request.params?.telegramId
+                    && request.params.telegramId !== payload.userId) return false;
                 telegramId = payload.userId;
+            } else if (!expectedRoomId) {
+                // Room creation and the global list have no room ID. A number
+                // is an identifier, never proof of the principal's identity.
+                const authorization = firstString(request.headers?.authorization);
+                const principal = authorization
+                    ? await this.appService.resolvePlatformPrincipal(authorization)
+                    : undefined;
+                const supplied = firstString(request.query.telegramId)
+                    || firstString(request.params.telegramId)
+                    || firstString(request.body.telegramId);
+                if (principal) {
+                    if (supplied && /^-?\d+$/.test(supplied) && supplied !== principal) {
+                        return false;
+                    }
+                    telegramId = principal;
+                } else if (!authorization && supplied && !/^i?\d+$/.test(supplied)) {
+                    // Existing trusted bot/schedule callers send an encrypted
+                    // identity. Preserve that credential during rollout.
+                    telegramId = this.appService.decryptTelegramId(supplied);
+                } else if (!authorization && request.method === 'POST'
+                    && (!supplied || /^i\d+$/.test(supplied))) {
+                    telegramId = this.appService.createAnonymousRoomUserId();
+                }
+                if (!this.isValidTelegramId(telegramId)) return false;
             } else {
-                if (
-                    expectedRoomId &&
-                    (this.appService.isRoomTokenRequired() ||
-                        !this.appService.isLegacyRoomIdAuthAllowed())
-                ) {
+                if (this.appService.isRoomTokenRequired()
+                    || !this.appService.isLegacyRoomIdAuthAllowed()) {
                     request.res?.status(403).json({ message: 'Неверная или истекшая ссылка комнаты' });
                     return false;
                 }
-                telegramId = firstString(request.query.telegramId) || firstString(request.params.telegramId) || firstString(request.body.telegramId);
+                // Legacy registered room links are encrypted credentials;
+                // never accept a caller-supplied numeric identity here.
+                const supplied = firstString(request.query.telegramId)
+                    || firstString(request.params.telegramId)
+                    || firstString(request.body.telegramId);
+                if (!supplied || /^i?\d+$/.test(supplied)) return false;
+                telegramId = this.appService.decryptTelegramId(supplied);
             }
 
             telegramId = this.normalizeTelegramId(telegramId);
@@ -171,7 +200,7 @@ export class AuthRoomGuard implements CanActivate {
             if (request.params?.telegramId) {
                 request.params.telegramId = telegramId;
             }
-            if (request.body?.telegramId) {
+            if (request.body && (request.body.telegramId || request.method === 'POST')) {
                 request.body.telegramId = telegramId;
             }
             if (request.query?.telegramId) {
