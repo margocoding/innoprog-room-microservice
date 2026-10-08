@@ -1,5 +1,5 @@
 import { Language } from '@prisma/client';
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { fillDto } from 'helpers/fill-dto/fill-dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateRoomDto } from './dto/create-room-dto';
@@ -200,19 +200,20 @@ export class RoomService {
   }
 
   async joinRoom(id: string, member: string) {
-    const room = await this.prisma.room.findUnique({ where: { id } });
-
-    if (!room) {
-      throw new NotFoundException('Room not found');
-    }
-
+    return this.prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${id} FOR UPDATE`;
+    const room = await tx.room.findUnique({ where: { id } });
+    if (!room) throw new NotFoundException('Room not found');
     const foundStudentInRoom = room.students.find(
       (student) => student === member,
     );
     if (foundStudentInRoom || room.teacher === member)
       return fillDto(RoomRdo, room);
 
-    const updatedRoom = await this.prisma.room.update({
+    if (room.students.length >= 128 || (/^i\d+$/.test(member) && room.students.filter(x => /^i\d+$/.test(x)).length >= 64)) {
+      throw new ForbiddenException('Достигнут лимит участников комнаты');
+    }
+    const updatedRoom = await tx.room.update({
       where: { id: room.id },
       data: {
         students: {
@@ -222,10 +223,18 @@ export class RoomService {
     });
 
     return fillDto(RoomRdo, updatedRoom);
+    }, { maxWait: 1000, timeout: 3000 });
   }
 
   async upsertRoomMember(roomId: string, telegramId: string, username?: string) {
-    return await this.prisma.roomMember.upsert({
+    if (username !== undefined && (typeof username !== 'string' || username.length > 120)) throw new BadRequestException('Слишком длинное имя участника');
+    return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${roomId} FOR UPDATE`;
+      const existing = await tx.roomMember.findUnique({ where: { telegramId_roomId: { telegramId, roomId } } });
+      if (!existing && await tx.roomMember.count({ where: { roomId } }) >= 256) {
+        throw new ForbiddenException('Достигнут лимит записей участников');
+      }
+      return tx.roomMember.upsert({
       where: {
         telegramId_roomId: {
           telegramId,
@@ -241,5 +250,6 @@ export class RoomService {
         ...(username !== undefined ? { username } : {}),
       },
     });
+    }, { maxWait: 1000, timeout: 3000 });
   }
 }

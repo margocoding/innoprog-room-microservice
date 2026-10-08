@@ -18,6 +18,7 @@ import { AuthRoomGuard } from './auth-room.guard';
 import { Language } from '@prisma/client';
 import { createHmac, randomBytes } from 'node:crypto';
 import { socketMetrics } from '../socket-metrics';
+import { RoomResourceBudget, MAX_UPDATE_BYTES, MAX_SNAPSHOT_BYTES } from './room-resource-budget';
 
 interface JoinPayload {
   telegramId: string;
@@ -213,6 +214,7 @@ export class RoomGateway
   private readonly SNAPSHOT_ACK_TIMEOUT_MS = Number(
     process.env.ROOM_SNAPSHOT_ACK_TIMEOUT_MS ?? 10_000,
   );
+  private readonly resourceBudget = new RoomResourceBudget();
   private docs = new Map<string, Y.Doc>();
   private docInitTasks = new Map<string, Promise<Y.Doc>>();
   private timers = new Map<string, NodeJS.Timeout>();
@@ -338,6 +340,8 @@ export class RoomGateway
   }
 
   private normalizeBinaryUpdate(value: unknown): Uint8Array {
+    const size = (value as any)?.byteLength ?? (Array.isArray(value) ? value.length : (value as any)?.data?.length);
+    if (!Number.isSafeInteger(size) || size < 0 || size > MAX_UPDATE_BYTES) throw new Error('Слишком большое обновление кода');
     if (value instanceof Uint8Array) return value;
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (ArrayBuffer.isView(value)) {
@@ -527,6 +531,10 @@ export class RoomGateway
     @ConnectedSocket() client: Socket,
   ) {
     const { telegramId, roomId, username, clientInstanceId } = data;
+    if ((username !== undefined && (typeof username !== 'string' || username.length > 120)) ||
+        (clientInstanceId !== undefined && (typeof clientInstanceId !== 'string' || clientInstanceId.length > 128))) {
+      client.emit('join-room:error', {message:'Слишком длинные данные участника'}); return;
+    }
 
     let room = await this.roomService.getRoom(roomId);
 
@@ -534,6 +542,10 @@ export class RoomGateway
       client.emit('join-room:error', { message: 'Комната не найдена' });
       return;
     }
+
+    let doc: Y.Doc;
+    try { doc = await this.getOrCreateDoc(roomId); }
+    catch { client.emit('join-room:error', { message: 'Документ превышает лимит или редактор временно занят. Сохранённый код не изменён' }); return; }
 
     const isParticipant =
       room.teacher === telegramId || room.students.includes(telegramId);
@@ -684,7 +696,6 @@ export class RoomGateway
       completed: room.completed,
     });
 
-    const doc = await this.getOrCreateDoc(room.id);
 
     client.emit('code-edit-action', {
       update: Y.encodeStateAsUpdate(doc),
@@ -711,6 +722,7 @@ export class RoomGateway
       const clientStateVector = this.normalizeBinaryUpdate(data.stateVector);
       const serverUpdate = Y.encodeStateAsUpdate(doc, clientStateVector);
       const serverStateVector = Y.encodeStateVector(doc);
+      this.resourceBudget.consume(data.roomId, client.id, Math.max(clientStateVector.byteLength, serverUpdate.byteLength), Date.now(), true);
 
       this.logger.log(
         JSON.stringify({
@@ -745,6 +757,9 @@ export class RoomGateway
     @MessageBody() data: CodeSyncUpdatePayload,
     @ConnectedSocket() client: Socket,
   ) {
+    if (typeof data.clientInstanceId !== 'string' || data.clientInstanceId.length > 128 || !Number.isSafeInteger(data.sequence) || data.sequence < 0) {
+      return {ok:false, sequence:data.sequence, error:'Некорректный идентификатор синхронизации'};
+    }
     const activeRoom = this.activeRooms.find((room) => room.id === data.roomId);
     if (!activeRoom) {
       return {
@@ -794,7 +809,8 @@ export class RoomGateway
             error: 'Сессия комнаты устарела',
           };
         }
-        const integratedUpdate = applyYjsUpdate(doc, update);
+        this.resourceBudget.consume(data.roomId, client.id, update.byteLength);
+        const integratedUpdate = this.resourceBudget.apply(data.roomId, doc, update, applyYjsUpdate);
         const version = this.markRoomSnapshotDirty(data.roomId);
 
         const member = activeRoom.members.find(
@@ -1096,8 +1112,15 @@ export class RoomGateway
       });
     }
 
-    const update = this.normalizeBinaryUpdate(data.update);
-    const integratedUpdate = applyYjsUpdate(doc, update);
+    let integratedUpdate: Uint8Array | null;
+    try {
+      const update = this.normalizeBinaryUpdate(data.update);
+      this.resourceBudget.consume(data.roomId, client.id, update.byteLength);
+      integratedUpdate = this.resourceBudget.apply(data.roomId, doc, update, applyYjsUpdate);
+    } catch {
+      client.emit('error', { message: 'Обновление кода превышает лимит или повреждено' });
+      return;
+    }
     if (!integratedUpdate) return;
     this.markRoomSnapshotDirty(data.roomId);
 
@@ -1109,7 +1132,7 @@ export class RoomGateway
     });
   }
 
-  @SubscribeMessage('edit-member') handleEditMember(
+  @SubscribeMessage('edit-member') async handleEditMember(
     client: Socket,
     data: EditMember,
   ) {
@@ -1130,12 +1153,12 @@ export class RoomGateway
       (member.telegramId === data.telegramId ||
         activeRoom.teacher === data.telegramId)
     ) {
+      if (data.username !== undefined && (typeof data.username !== 'string' || data.username.length > 120)) {
+        client.emit('error', {message:'Слишком длинное имя участника'}); return;
+      }
+      try { await this.roomService.upsertRoomMember(data.roomId, data.changeTelegramId, data.username); }
+      catch { client.emit('error', {message:'Не удалось сохранить имя участника'}); return; }
       member.username = data.username;
-      void this.roomService.upsertRoomMember(
-        data.roomId,
-        data.changeTelegramId,
-        data.username,
-      );
 
       this.emitMembersUpdated(activeRoom, 'username-update', data.telegramId);
     } else {
@@ -1247,6 +1270,7 @@ export class RoomGateway
         }),
       );
     }
+    this.resourceBudget.releaseSocket(client.id);
     this.disconnectReasons.delete(client.id);
     this.intentionalDisconnectReasons.delete(client.id);
     await this.markSocketLeft(client);
@@ -1383,6 +1407,7 @@ export class RoomGateway
     if (doc) {
       doc.destroy();
       this.docs.delete(roomId);
+      this.resourceBudget.releaseRoom(roomId);
     }
   }
 
@@ -1483,13 +1508,16 @@ export class RoomGateway
       return pendingTask;
     }
 
+    this.resourceBudget.reserveRoom(roomId);
     const initTask = (async () => {
       const doc = new Y.Doc();
       const snapshot = await this.roomService.getRoomSnapshot(roomId);
 
       if (snapshot) {
         try {
+          if (snapshot.length > Math.ceil(MAX_SNAPSHOT_BYTES / 3) * 4) throw new Error('Saved snapshot exceeds resource limit');
           Y.applyUpdate(doc, Buffer.from(snapshot, 'base64'));
+          this.resourceBudget.remember(roomId, doc);
           this.lastPersistedSnapshots.set(roomId, snapshot);
         } catch (error) {
           const message =
@@ -1497,12 +1525,14 @@ export class RoomGateway
           this.logger.warn(
             `Cannot apply saved snapshot for room ${roomId}: ${message}`,
           );
-          this.lastPersistedSnapshots.set(roomId, null);
+          doc.destroy();
+          throw new Error('Сохранённый документ превышает лимит или повреждён; исходные данные сохранены');
         }
       } else {
         this.lastPersistedSnapshots.set(roomId, null);
       }
 
+      this.resourceBudget.remember(roomId, doc);
       this.docs.set(roomId, doc);
       this.snapshotVersions.set(roomId, 0);
       this.persistedSnapshotVersions.set(roomId, 0);
@@ -1513,6 +1543,9 @@ export class RoomGateway
 
     try {
       return await initTask;
+    } catch (error) {
+      this.resourceBudget.releaseRoom(roomId);
+      throw error;
     } finally {
       this.docInitTasks.delete(roomId);
     }

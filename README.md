@@ -105,3 +105,21 @@ Nest is an MIT-licensed open source project. It can grow thanks to the sponsors 
 ## License
 
 Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+
+## Room resource limits
+
+The server validates Yjs updates on a disposable clone before touching the live
+room. Limits: 128 KiB per update, 256 KiB shared content, 1 MiB encoded CRDT
+snapshot (including deleted and pending structs), 32 MiB snapshots across at most
+128 loaded rooms. Socket, room and process token buckets bound update frequency
+and bytes. A rejected update is not broadcast or persisted. Oversized/corrupt
+stored snapshots are preserved and never replaced with an empty document.
+
+New guest tokens use an atomic shared Redis budget (12/minute per room,
+120/minute overall). Reconnecting with a valid signed browser cookie does not
+consume a new guest admission. PostgreSQL row locks enforce 64 guest students,
+128 students overall, and 256 member records per room under concurrent joins;
+existing identities may reconnect at the limit. No historic guests are deleted.
+
+`GET /api/room/:id/execution-access` returns verified `userId` alongside `ok` so
+API admission can bind user and room quotas without trusting browser JSON.

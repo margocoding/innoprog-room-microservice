@@ -36,7 +36,9 @@ describe('RoomService', () => {
         update: jest.fn(),
         create: jest.fn(),
       },
-      roomMember: { upsert: jest.fn() },
+      roomMember: { upsert: jest.fn(), count: jest.fn().mockResolvedValue(0), findUnique: jest.fn().mockResolvedValue(null) },
+      $queryRaw: jest.fn().mockResolvedValue([]),
+      $transaction: jest.fn(async (callback: any) => callback(prisma)),
     };
     service = new RoomService(prisma as PrismaService);
   });

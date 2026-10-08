@@ -1232,7 +1232,7 @@ describe('RoomGateway events', () => {
     });
   });
 
-  it('allows a member or teacher to rename a room member', () => {
+  it('allows a member or teacher to rename a room member', async () => {
     const { gateway, roomService, roomEmit } = createGateway();
     const client = createClient('socket');
     gateway.activeRooms = [
@@ -1241,7 +1241,7 @@ describe('RoomGateway events', () => {
         members: [{ telegramId: 'student', clientId: 'socket', online: true }],
       },
     ] as any;
-    gateway.handleEditMember(client, {
+    await gateway.handleEditMember(client, {
       roomId: 'room-1',
       telegramId: 'teacher-1',
       changeTelegramId: 'student',
@@ -1256,7 +1256,7 @@ describe('RoomGateway events', () => {
       'members-updated',
       expect.objectContaining({ trigger: 'username-update' }),
     );
-    gateway.handleEditMember(client, {
+    await gateway.handleEditMember(client, {
       roomId: 'room-1',
       telegramId: 'stranger',
       changeTelegramId: 'student',
@@ -1285,7 +1285,7 @@ describe('RoomGateway events', () => {
     });
   });
 
-  it('loads a saved Yjs snapshot and tolerates a damaged one', async () => {
+  it('loads a saved snapshot and preserves damaged stored data without resetting it', async () => {
     const source = new Y.Doc();
     source.getText('codemirror').insert(0, 'saved');
     const encoded = Buffer.from(Y.encodeStateAsUpdate(source)).toString(
@@ -1305,6 +1305,7 @@ describe('RoomGateway events', () => {
       { telegramId: 'teacher-1', roomId: 'room-1' },
       createClient('invalid'),
     );
-    expect(invalid.gateway.activeRooms).toHaveLength(1);
+    expect(invalid.gateway.activeRooms).toHaveLength(0);
+    expect(invalid.roomService.saveRoomSnapshot).not.toHaveBeenCalled();
   });
 });

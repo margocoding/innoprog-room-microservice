@@ -17,6 +17,10 @@ export class AppService {
         private readonly roomLaunchCodeStore: RoomLaunchCodeStore = new RoomLaunchCodeStore(),
     ) {}
 
+    async admitGuestToken(roomId: string): Promise<boolean> {
+        return this.roomLaunchCodeStore.admitGuestToken(roomId);
+    }
+
     private b64urlEncode(data: Buffer | string) {
         return Buffer.from(data).toString('base64url');
     }

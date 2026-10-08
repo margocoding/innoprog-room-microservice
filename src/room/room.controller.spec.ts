@@ -8,6 +8,7 @@ describe('RoomController', () => {
   let controller: RoomController;
   let roomService: { getRoom: jest.Mock; createRoom: jest.Mock; deleteRoom: jest.Mock; getRooms: jest.Mock };
   let appService: {
+    admitGuestToken: jest.Mock;
     createAnonymousRoomUserId: jest.Mock;
     createRoomToken: jest.Mock;
     createRoomLaunchCode: jest.Mock;
@@ -27,6 +28,7 @@ describe('RoomController', () => {
       getRooms: jest.fn().mockResolvedValue({ rooms: [], total: 0 }),
     };
     appService = {
+      admitGuestToken: jest.fn().mockResolvedValue(true),
       createAnonymousRoomUserId: jest.fn(() => 'i999999'),
       createRoomToken: jest.fn((roomId: string, telegramId: string) => {
         return `token-${roomId}-${telegramId}`;
@@ -73,6 +75,7 @@ describe('RoomController', () => {
     process.env.ROOM_TOKEN_SECRET = 'test-only-room-discovery-secret';
     try {
       const realService = new AppService();
+      jest.spyOn(realService, 'admitGuestToken').mockResolvedValue(true);
       const actualController = new RoomController(roomService as any, realService);
       const session = await actualController.createAnonymousRoomToken(
         'room-1', { telegramId: 'i123456' }, { headers: {} } as any, response as any,
@@ -121,7 +124,7 @@ describe('RoomController', () => {
   it.each(['teacher-1', 'i123'])('preserves execution access for verified room member %s', async (userId) => {
     appService.verifyRoomToken.mockReturnValue({ roomId: 'room-1', userId });
     roomService.getRoom.mockResolvedValue({ teacher: 'teacher-1', students: ['i123'], completed: true });
-    await expect(controller.executionAccess('room-1', { headers: { 'x-room-token': 'signed' } } as any)).resolves.toEqual({ ok: true });
+    await expect(controller.executionAccess('room-1', { headers: { 'x-room-token': 'signed' } } as any)).resolves.toEqual({ ok: true, userId });
     expect(appService.verifyRoomToken).toHaveBeenCalledWith('signed', 'room-1');
   });
 
@@ -302,4 +305,13 @@ describe('RoomController', () => {
       expect.anything(),
     );
   });
+  it('does not issue a new identity or cookie when the shared guest budget fails', async () => {
+    appService.admitGuestToken.mockResolvedValue(false);
+    await expect(controller.createAnonymousRoomToken('room-1', {}, {headers:{}} as any, response as any)).rejects.toBeDefined();
+    expect(appService.createAnonymousRoomUserId).not.toHaveBeenCalled();
+    expect(response.cookie).not.toHaveBeenCalled();
+    appService.admitGuestToken.mockRejectedValue(new Error('redis down'));
+    await expect(controller.createAnonymousRoomToken('room-1', {}, {headers:{}} as any, response as any)).rejects.toMatchObject({status:503});
+  });
+
 });

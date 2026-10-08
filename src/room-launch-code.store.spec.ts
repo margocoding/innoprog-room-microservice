@@ -91,4 +91,18 @@ describe('RoomLaunchCodeStore', () => {
     await store.onModuleDestroy();
     expect(client.quit).toHaveBeenCalledTimes(1);
   });
+  it('bounds outstanding guest admissions when Redis stops responding', async () => {
+    jest.useFakeTimers();
+    const pending = new Promise(() => {});
+    client.eval.mockReturnValue(pending);
+    const store = new RoomLaunchCodeStore();
+    const calls = Array.from({length:32},()=>store.admitGuestToken('room').catch(e=>e));
+    await expect(store.admitGuestToken('room')).rejects.toThrow('busy');
+    await jest.advanceTimersByTimeAsync(1000);
+    const errors = await Promise.all(calls);
+    expect(errors.every(e => e.message.includes('timed out'))).toBe(true);
+    await expect(store.admitGuestToken('room')).rejects.toThrow('busy');
+    jest.useRealTimers();
+  });
+
 });

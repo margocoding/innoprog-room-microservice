@@ -32,6 +32,7 @@ export interface RoomLaunchPayload {
 @Injectable()
 export class RoomLaunchCodeStore implements OnModuleDestroy {
   private client?: RedisClientType;
+  private guestRequests = 0;
   private connecting?: Promise<RedisClientType>;
 
   private async getClient(): Promise<RedisClientType> {
@@ -64,6 +65,30 @@ export class RoomLaunchCodeStore implements OnModuleDestroy {
       this.connecting = undefined;
     });
     return this.connecting;
+  }
+
+  async admitGuestToken(roomId: string): Promise<boolean> {
+    if (this.guestRequests >= 32) throw new Error('Guest admission busy');
+    this.guestRequests += 1;
+    // Keep ownership until Redis actually settles, even after the HTTP timeout.
+    const operation = (async () => {
+      const client = await this.getClient();
+      const script = `
+local g = tonumber(redis.call('GET', KEYS[1]) or '0')
+local r = tonumber(redis.call('GET', KEYS[2]) or '0')
+if g >= 120 or r >= 12 then return 0 end
+redis.call('INCR', KEYS[1]); if g == 0 then redis.call('EXPIRE', KEYS[1], 60) end
+redis.call('INCR', KEYS[2]); if r == 0 then redis.call('EXPIRE', KEYS[2], 60) end
+return 1`;
+      return await client.eval(script, { keys: ['innoprog:ide-room:guest:global', `innoprog:ide-room:guest:${roomId}`], arguments: [] }) === 1;
+    })();
+    void operation.finally(() => { this.guestRequests -= 1; }).catch(() => {});
+    let timer: NodeJS.Timeout;
+    try {
+      return await Promise.race([operation, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Guest admission timed out')), 1000);
+      })]);
+    } finally { clearTimeout(timer!); }
   }
 
   async create(payload: RoomLaunchPayload): Promise<string> {

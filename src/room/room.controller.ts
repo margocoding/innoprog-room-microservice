@@ -48,7 +48,7 @@ export class RoomController {
   ) { }
 
   @Get('/:id/execution-access')
-  async executionAccess(@Param('id') id: string, @Req() request: Request): Promise<{ ok: true }> {
+  async executionAccess(@Param('id') id: string, @Req() request: Request): Promise<{ ok: true; userId: string }> {
     const raw = request.headers['x-room-token'];
     const token = typeof raw === 'string' && raw.length <= 4096 ? raw : '';
     // Always enforce signed room access, regardless of legacy join settings.
@@ -60,7 +60,7 @@ export class RoomController {
     }
     // Preserve existing access to completed lesson rooms; deleting the room
     // revokes this capability immediately without distributing its signing key.
-    return { ok: true };
+    return { ok: true, userId: claims.userId };
   }
 
   @ApiOperation({ summary: 'Create room' })
@@ -141,6 +141,15 @@ export class RoomController {
     const existing = cookieToken
       ? this.appService.verifyRoomBrowserSession(cookieToken, id)
       : undefined;
+    if (!existing) {
+      let admitted: boolean;
+      try { admitted = await this.appService.admitGuestToken(id); }
+      catch { throw new ServiceUnavailableException('Вход в комнату временно недоступен'); }
+      if (!admitted) throw new ForbiddenException('Превышен лимит новых гостей. Повторите позже');
+      if ((room.students ?? []).filter(x => /^i\d+$/.test(x)).length >= 64 || (room.students ?? []).length >= 128) {
+        throw new ForbiddenException('Достигнут лимит участников комнаты');
+      }
+    }
     const telegramId = existing?.userId
       || this.appService.createAnonymousRoomUserId();
     this.clearLegacyRoomSessionCookies(response, request.headers.cookie);
