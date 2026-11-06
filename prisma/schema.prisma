@@ -26,6 +26,7 @@ model Log {
   roomId    String
   room      Room     @relation(references: [id], fields: [roomId], onDelete: Cascade)
 
+  @@index([roomId, createdAt(sort: Desc)], map: "logs_roomId_createdAt_idx")
   @@map("logs")
 }
 
@@ -44,6 +45,8 @@ model Room {
   createdAt               DateTime     @default(now())
   updatedAt               DateTime     @default(now()) @updatedAt
 
+  @@index([teacher, createdAt(sort: Desc)], map: "rooms_teacher_createdAt_idx")
+  @@index([students], type: Gin, map: "rooms_students_idx")
   @@map("rooms")
 }
 
@@ -57,6 +60,7 @@ model RoomMember {
   updatedAt  DateTime @updatedAt
 
   @@unique([telegramId, roomId])
+  @@index([roomId], map: "room_members_roomId_idx")
   @@map("room_members")
 }
 
