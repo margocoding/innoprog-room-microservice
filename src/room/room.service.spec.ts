@@ -31,6 +31,8 @@ describe('RoomService', () => {
         findMany: jest.fn(),
         count: jest.fn(),
       },
+      personalLessonTask: { findFirst: jest.fn(), updateMany: jest.fn(), deleteMany: jest.fn() },
+      roomLessonDraft: { deleteMany: jest.fn() },
       log: {
         findFirst: jest.fn(),
         update: jest.fn(),
@@ -41,6 +43,29 @@ describe('RoomService', () => {
       $transaction: jest.fn(async (callback: any) => callback(prisma)),
     };
     service = new RoomService(prisma as PrismaService);
+  });
+
+  it('edits only a personal task belonging to the owner', async () => {
+    const id = 'a1234567-1234-1234-1234-123456789abc';
+    const task = { title: 'Title', description: 'Description', moduleId: 1, language: 'py' };
+    prisma.personalLessonTask.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce({ payload: task });
+    await expect(service.updatePersonalLesson('other', id, task)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.updatePersonalLesson('owner', id, task)).resolves.toMatchObject({ ...task, id });
+    expect(prisma.personalLessonTask.updateMany).toHaveBeenCalledTimes(1);
+    expect(prisma.personalLessonTask.updateMany).toHaveBeenCalledWith({
+      where: { id, owner: 'owner' }, data: { moduleId: 1, payload: { ...task, initialCode: '', input: '' } },
+    });
+  });
+
+  it('deletes only a personal task belonging to the owner', async () => {
+    const id = 'a1234567-1234-1234-1234-123456789abc';
+    prisma.personalLessonTask.deleteMany.mockResolvedValueOnce({ count: 0 }).mockResolvedValueOnce({ count: 1 });
+    await expect(service.deletePersonalLesson('other', id)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.deletePersonalLesson('owner', id)).resolves.toEqual({ success: true });
+    expect(prisma.personalLessonTask.deleteMany.mock.calls).toEqual([
+      [{ where: { id, owner: 'other' } }],
+      [{ where: { id, owner: 'owner' } }],
+    ]);
   });
 
   it('creates a room and maps every permission', async () => {
@@ -100,6 +125,7 @@ describe('RoomService', () => {
     expect(prisma.room.update).toHaveBeenCalledWith({
       where: {
         id: 'room-1', completed: false,
+        NOT: { lessonKey: { startsWith: 'platform:' } },
         OR: [{ teacher: 'student-1' }, { students: { has: 'student-1' } }],
       },
       data: { language: 'js' },

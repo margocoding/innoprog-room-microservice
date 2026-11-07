@@ -91,6 +91,18 @@ export class RoomController {
     return this.roomService.createPersonalLesson(await this.lessonOwner(id, request), body);
   }
 
+  @Header('Cache-Control', 'private, no-store')
+  @Put('/:id/lessons/personal/:taskId')
+  async updatePersonalLesson(@Param('id') id: string, @Param('taskId') taskId: string, @Req() request: Request, @Body() body: unknown) {
+    return this.roomService.updatePersonalLesson(await this.lessonOwner(id, request), taskId, body);
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Delete('/:id/lessons/personal/:taskId')
+  async deletePersonalLesson(@Param('id') id: string, @Param('taskId') taskId: string, @Req() request: Request) {
+    return this.roomService.deletePersonalLesson(await this.lessonOwner(id, request), taskId);
+  }
+
   @Get('/:id/execution-access')
   async executionAccess(@Param('id') id: string, @Req() request: Request): Promise<{ ok: true; userId: string }> {
     const raw = request.headers['x-room-token'];

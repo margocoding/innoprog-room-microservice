@@ -1048,6 +1048,11 @@ export class RoomGateway
     }
     if (room.completed) return;
     if (data.language !== undefined && !this.acceptsLessonRevision(room.id, data.lessonRevision)) return;
+    if (data.language !== undefined && room.lessonKey?.startsWith('platform:')) {
+      client.emit('edit-room:error', { message: 'Язык задан платформенной задачей' });
+      return;
+    }
+
 
     if (
       data.language !== undefined &&

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { LessonTask, readLessonTask } from './lesson-task';
 import { Language, Prisma } from '@prisma/client';
 import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
@@ -7,6 +8,8 @@ import { CreateRoomDto } from './dto/create-room-dto';
 import { EditRoomDto } from './dto/edit-room-dto';
 import { GetRoomsDto } from './dto/get-rooms-dto';
 import { RoomRdo } from './rdo/room-rdo';
+
+const personalTaskId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
 @Injectable()
 export class RoomService {
@@ -55,9 +58,40 @@ export class RoomService {
     });
   }
 
+  async updatePersonalLesson(owner: string, id: string, raw: unknown) {
+    if (!personalTaskId.test(id)) throw new NotFoundException('Задача не найдена');
+    const task = readLessonTask(raw);
+    return this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${'personal-lesson:' + owner}))`;
+      const previous = await tx.personalLessonTask.findFirst({ where: { id, owner }, select: { payload: true } });
+      if (!previous) throw new NotFoundException('Задача не найдена');
+      await tx.personalLessonTask.updateMany({
+        where: { id, owner }, data: { moduleId: task.moduleId, payload: { ...task } },
+      });
+      if (task.language !== readLessonTask(previous.payload).language) {
+        await tx.roomLessonDraft.updateMany({
+          where: { key: 'personal:' + id, room: { teacher: owner } },
+          data: { language: task.language },
+        });
+      }
+      return { ...task, id };
+    });
+  }
+
+  async deletePersonalLesson(owner: string, id: string) {
+    if (!personalTaskId.test(id)) throw new NotFoundException('Задача не найдена');
+    return this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${'personal-lesson:' + owner}))`;
+      const result = await tx.personalLessonTask.deleteMany({ where: { id, owner } });
+      if (!result.count) throw new NotFoundException('Задача не найдена');
+      await tx.roomLessonDraft.deleteMany({ where: { key: 'personal:' + id, room: { teacher: owner } } });
+      return { success: true };
+    });
+  }
+
   async resolveLesson(owner: string, source: string, id: unknown, credential: unknown) {
     if (source === 'free') return { key: 'free', task: null };
-    if (source === 'personal' && typeof id === 'string' && /^[a-f0-9-]{36}$/.test(id)) {
+    if (source === 'personal' && typeof id === 'string' && personalTaskId.test(id)) {
       const row = await this.prisma.personalLessonTask.findFirst({ where: { id, owner } });
       if (row) return { key: 'personal:' + id, task: readLessonTask(row.payload) };
     }
@@ -73,26 +107,47 @@ export class RoomService {
     outgoing: string, prepare: (snapshot: string | null, task: LessonTask | null, codeInline: boolean) => string,
   ) {
     return this.prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtext(${'personal-lesson:' + owner}))`;
       await tx.$queryRaw`SELECT id FROM rooms WHERE id = ${id} FOR UPDATE`;
       const room = await tx.room.findUnique({ where: { id } });
       if (!room || room.teacher !== owner || room.completed || room.lessonRevision !== revision) {
         throw new ForbiddenException('Комната изменилась. Повторите выбор');
       }
-      if (room.lessonKey === key && revision > 0) return null;
+      const storedPersonalTask = async (personalKey: string) => {
+        const row = await tx.personalLessonTask.findFirst({
+          where: { id: personalKey.slice('personal:'.length), owner }, select: { payload: true },
+        });
+        return row ? readLessonTask(row.payload) : null;
+      };
+      if (key.startsWith('personal:')) {
+        task = await storedPersonalTask(key);
+        if (!task) throw new NotFoundException('Задача не найдена');
+      }
+      const sameDocument = room.lessonKey === key;
+      if (sameDocument && revision > 0 && isDeepStrictEqual(room.lessonTask, task)) return null;
       const draft = await tx.roomLessonDraft.findUnique({ where: { roomId_key: { roomId: id, key } } });
       if (!draft && room.lessonKey !== key && await tx.roomLessonDraft.count({ where: { roomId: id } }) >= 40) {
         throw new BadRequestException('Достигнут лимит черновиков комнаты');
       }
       const snapshot = prepare(
-        draft?.snapshot ?? (room.lessonKey === key ? outgoing : null),
+        sameDocument ? outgoing : draft?.snapshot ?? null,
         task,
-        draft?.codeInline ?? (room.lessonKey === key),
+        sameDocument || Boolean(draft?.codeInline),
       );
-      await tx.roomLessonDraft.upsert({
-        where: { roomId_key: { roomId: id, key: room.lessonKey } },
-        create: { roomId: id, key: room.lessonKey, language: room.language, snapshot: outgoing, codeInline: true },
-        update: { language: room.language, snapshot: outgoing, codeInline: true },
-      });
+      const outgoingTask = room.lessonTask as unknown as LessonTask | null;
+      const outgoingPersonal = room.lessonKey.startsWith('personal:');
+      const current = outgoingPersonal ? (sameDocument ? task : await storedPersonalTask(room.lessonKey)) : null;
+      const draftLanguage = current && outgoingTask && current.language !== outgoingTask.language
+        ? current.language : room.language;
+      // Deleted library items cannot be reopened. Their visit still retains the final room code.
+      if (!outgoingPersonal || current) {
+        await tx.roomLessonDraft.upsert({
+          where: { roomId_key: { roomId: id, key: room.lessonKey } },
+          create: { roomId: id, key: room.lessonKey, language: draftLanguage, snapshot: outgoing, codeInline: true },
+          update: { language: draftLanguage, snapshot: outgoing, codeInline: true },
+        });
+      }
+      const language = task?.platformId ? task.language : sameDocument ? draftLanguage : draft?.language ?? task?.language ?? room.language;
       const now = new Date();
       await tx.roomLessonVisit.updateMany({
         where: { roomId: id, revision, endedAt: null },
@@ -100,7 +155,7 @@ export class RoomService {
       });
       if (task) {
         await tx.roomLessonVisit.create({
-          data: { roomId: id, revision: revision + 1, taskKey: key, title: task.title, language: draft?.language ?? task.language, startedAt: now },
+          data: { roomId: id, revision: revision + 1, taskKey: key, title: task.title, language, startedAt: now },
         });
       }
       const next = await tx.room.update({
@@ -108,7 +163,7 @@ export class RoomService {
         data: {
           lessonKey: key, lessonTask: task ? { ...task } : Prisma.DbNull,
           lessonRevision: { increment: 1 }, lessonSnapshot: snapshot, lessonCodeInline: true,
-          language: draft?.language ?? task?.language ?? room.language,
+          language,
         },
       });
       return fillDto(RoomRdo, next);
@@ -145,7 +200,10 @@ export class RoomService {
       }
 
       const editedRoom = await this.prisma.room.update({
-        where: { id, teacher: dto.telegramId, lessonRevision },
+        where: {
+          id, teacher: dto.telegramId, lessonRevision,
+          ...(dto.language !== undefined && { NOT: { lessonKey: { startsWith: 'platform:' } } }),
+        },
         data: {
           ...(dto.taskId !== undefined && { taskId: dto.taskId }),
           ...(dto.language !== undefined && { language: dto.language }),
@@ -176,6 +234,7 @@ export class RoomService {
       where: {
         id,
         completed: false,
+        NOT: { lessonKey: { startsWith: 'platform:' } },
         lessonRevision,
         OR: [{ teacher: telegramId }, { students: { has: telegramId } }],
       },
