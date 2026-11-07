@@ -94,6 +94,12 @@ export class RoomResourceBudget {
     return state;
   }
 
+  holdReplacement(roomId: string, doc: Y.Doc) {
+    const state = this.validate(roomId, doc);
+    this.sizes.set(roomId, Math.max(this.sizes.get(roomId) ?? 0, state.byteLength));
+    return state;
+  }
+
   remember(roomId: string, doc: Y.Doc) {
     this.reserveRoom(roomId);
     this.sizes.set(roomId, this.validate(roomId, doc).byteLength);

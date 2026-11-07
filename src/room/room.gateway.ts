@@ -1,3 +1,4 @@
+import { insertLessonTemplate, type LessonTask } from './lesson-task';
 import {
   ConnectedSocket,
   MessageBody,
@@ -16,7 +17,7 @@ import * as Y from 'yjs';
 import { BeforeApplicationShutdown, Logger, UseGuards } from '@nestjs/common';
 import { AuthRoomGuard } from './auth-room.guard';
 import { Language } from '@prisma/client';
-import { createHmac, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { socketMetrics } from '../socket-metrics';
 import { RoomResourceBudget, MAX_UPDATE_BYTES, MAX_SNAPSHOT_BYTES } from './room-resource-budget';
 
@@ -51,6 +52,7 @@ interface Member {
   };
   userColor?: string;
   lastActivity?: Date;
+  presence?: Promise<string | undefined>;
 }
 
 interface Room {
@@ -61,9 +63,15 @@ interface Room {
   studentSelectionEnabled: boolean;
   studentEditCodeEnabled: boolean;
   completed: boolean;
+  lessonRevision?: number;
+  presenceHeartbeatAt?: number;
+  lessonKey?: string;
+  lessonTask?: LessonTask | null;
+  language?: Language;
 }
 
 interface EditPayload extends EditRoomDto {
+  lessonRevision?: number;
   roomId: string;
   telegramId: string;
 }
@@ -101,10 +109,12 @@ interface CodeEditPayload {
   roomId: string;
   telegramId: string;
   update: Uint8Array;
+  lessonRevision?: number;
 }
 
 interface CodeSyncInitPayload extends JoinPayload {
   stateVector: Uint8Array;
+  lessonRevision?: number;
 }
 
 interface CodeSyncUpdatePayload extends CodeEditPayload {
@@ -215,6 +225,8 @@ export class RoomGateway
     process.env.ROOM_SNAPSHOT_ACK_TIMEOUT_MS ?? 10_000,
   );
   private readonly resourceBudget = new RoomResourceBudget();
+  private readonly resolvingLessons = new Set<string>();
+  private readonly switchingLessons = new Set<string>();
   private docs = new Map<string, Y.Doc>();
   private docInitTasks = new Map<string, Promise<Y.Doc>>();
   private timers = new Map<string, NodeJS.Timeout>();
@@ -431,6 +443,22 @@ export class RoomGateway
     socket.disconnect(true);
   }
 
+  private async recordPresence(members: Member[], leaving = false) {
+    const at = new Date();
+    const pending = members.map(member => {
+      const presence = member.presence;
+      if (leaving) member.presence = undefined;
+      return presence;
+    });
+    const ids = (await Promise.all(pending)).filter((id): id is string => Boolean(id));
+    if (!ids.length) return;
+    try {
+      await this.roomService.recordPresence(ids, at, leaving);
+    } catch {
+      this.logger.warn('Could not update room presence history');
+    }
+  }
+
   private async markSocketLeft(
     client: Socket,
     options: { exceptRoomId?: string } = {},
@@ -456,6 +484,7 @@ export class RoomGateway
 
       for (const member of members) {
         member.online = false;
+        void this.recordPresence([member], true);
         member.lastSelection = undefined;
         this.forgetSocketMembership(client.id, room.id);
 
@@ -487,7 +516,7 @@ export class RoomGateway
       });
 
       const onlineMembers = room.members.filter((m) => m.online);
-      if (onlineMembers.length === 0) {
+      if (onlineMembers.length === 0 && !this.switchingLessons.has(room.id)) {
         await this.flushRoomSnapshot(room.id, { force: true });
 
         const roomIndex = this.activeRooms.findIndex((r) => r.id === room.id);
@@ -524,6 +553,112 @@ export class RoomGateway
       hash = userId.charCodeAt(i) + ((hash << 5) - hash);
     }
     return colors[Math.abs(hash) % colors.length];
+  }
+
+  private lessonState(room: Room | RoomRdo) {
+    return {
+      revision: room.lessonRevision ?? 0,
+      key: room.lessonKey ?? 'free',
+      task: room.lessonTask ?? null,
+      language: room.language,
+    };
+  }
+
+  private acceptsLessonRevision(roomId: string, revision?: number) {
+    const current = this.activeRooms.find(room => room.id === roomId)?.lessonRevision ?? 0;
+    return !this.switchingLessons.has(roomId) && (revision ?? 0) === current;
+  }
+
+  @SubscribeMessage('room-lesson:select')
+  async selectLesson(
+    @MessageBody() data: JoinPayload & { source: string; id?: unknown; credential?: unknown; revision: number },
+    @ConnectedSocket() client: Socket,
+  ) {
+    const room = this.activeRooms.find(item => item.id === data.roomId);
+    if (!room || room.completed || room.teacher !== data.telegramId ||
+        client.data?.roomAuth?.userId !== room.teacher ||
+        client.data?.roomAuth?.roomId !== room.id ||
+        client.data.roomAuth.exp <= Math.floor(Date.now() / 1000) ||
+        !this.isCurrentSocketMember(client, room.id, data.telegramId)) {
+      return { ok: false, error: 'Выбор задач доступен владельцу комнаты' };
+    }
+    if (this.resolvingLessons.has(room.id) || !this.acceptsLessonRevision(room.id, data.revision)) {
+      return { ok: false, error: 'Задача уже меняется. Повторите выбор' };
+    }
+    // Resolve platform content before blocking edits in the room.
+    let selection: Awaited<ReturnType<RoomService['resolveLesson']>>;
+    this.resolvingLessons.add(room.id);
+    try {
+      selection = await this.roomService.resolveLesson(room.teacher, data.source, data.id, data.credential);
+    } catch (error) {
+      return { ok: false, error: error?.getStatus?.() < 500 ? error.message : 'Не удалось загрузить задачу' };
+    } finally {
+      this.resolvingLessons.delete(room.id);
+    }
+    if (room.completed || !this.acceptsLessonRevision(room.id, data.revision) ||
+        !this.isCurrentSocketMember(client, room.id, data.telegramId)) {
+      return { ok: false, error: 'Комната изменилась. Повторите выбор' };
+    }
+    this.switchingLessons.add(room.id);
+    let candidate: Y.Doc | undefined;
+    let old: Y.Doc | undefined;
+    try {
+      old = await this.getOrCreateDoc(room.id);
+      await this.snapshotFlushTasks.get(room.id);
+      const outgoing = Buffer.from(Y.encodeStateAsUpdate(old)).toString('base64');
+      const next = await this.roomService.switchLesson(
+        room.id, room.teacher, data.revision, selection.key, selection.task, outgoing,
+        (snapshot, task, codeInline) => {
+          const doc = new Y.Doc();
+          candidate = doc;
+          if (snapshot) {
+            if (snapshot.length > Math.ceil(MAX_SNAPSHOT_BYTES / 3) * 4) throw new Error('Snapshot too large');
+            Y.applyUpdate(doc, Buffer.from(snapshot, 'base64'));
+          } else if (task?.initialCode) {
+            doc.getText('codemirror').insert(0, task.initialCode);
+          }
+          if (!codeInline) insertLessonTemplate(doc.getText('codemirror'), task);
+          return Buffer.from(this.resourceBudget.holdReplacement(room.id, doc)).toString('base64');
+        },
+      );
+      if (next && candidate) {
+        this.resourceBudget.remember(room.id, candidate);
+        this.docs.set(room.id, candidate);
+        candidate = undefined;
+        old.destroy();
+        const version = this.snapshotVersions.get(room.id) ?? 0;
+        this.persistedSnapshotVersions.set(room.id, version);
+        this.settleSnapshotWaiters(room.id, version);
+        this.snapshotDirtyRooms.delete(room.id);
+        this.lastPersistedSnapshots.delete(room.id);
+        const live = this.activeRooms.find(item => item.id === room.id) ?? room;
+        live.lessonKey = next.lessonKey;
+        live.lessonRevision = next.lessonRevision;
+        live.lessonTask = next.lessonTask;
+        live.language = next.language;
+        for (const member of live.members) {
+          member.lastCursorPosition = undefined;
+          member.lastSelection = undefined;
+        }
+        this.server.to(room.id).emit('room-lesson:changed', this.lessonState(live));
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Не удалось сохранить черновик и переключить задачу' };
+    } finally {
+      if (candidate) {
+        candidate.destroy();
+        if (old) this.resourceBudget.remember(room.id, old);
+      }
+      this.switchingLessons.delete(room.id);
+      if (this.snapshotDirtyRooms.has(room.id)) void this.flushRoomSnapshot(room.id);
+      const live = this.activeRooms.find(item => item.id === room.id) ?? room;
+      if (!live.members.some(member => member.online)) {
+        await this.flushRoomSnapshot(room.id, { force: true });
+        this.activeRooms = this.activeRooms.filter(item => item.id !== room.id);
+        this.cleanupRoomState(room.id);
+      }
+    }
   }
 
   @SubscribeMessage('join-room') async handleJoinRoom(
@@ -569,7 +704,11 @@ export class RoomGateway
 
     if (!activeRoom) {
       activeRoom = {
-        ...room,
+        id: room.id,
+        language: room.language,
+        lessonRevision: room.lessonRevision,
+        lessonKey: room.lessonKey,
+        lessonTask: room.lessonTask,
         members: [],
         studentCursorEnabled: room.studentCursorEnabled ?? true,
         studentSelectionEnabled: room.studentSelectionEnabled ?? true,
@@ -586,6 +725,7 @@ export class RoomGateway
         member.clientId === client.id && member.telegramId !== telegramId;
 
       if (isPreviousIdentityOnSameSocket) {
+        void this.recordPresence([member], true);
         this.forgetSocketMembership(client.id, activeRoom.id);
       }
 
@@ -598,6 +738,7 @@ export class RoomGateway
 
     for (const member of sameIdentityMembers) {
       if (member.clientId !== client.id) {
+        void this.recordPresence([member], true);
         const sameBrowserReconnect = Boolean(
           clientInstanceId && member.clientInstanceId === clientInstanceId,
         );
@@ -648,6 +789,19 @@ export class RoomGateway
       });
     }
 
+    const currentMember = existingMember ?? activeRoom.members.at(-1);
+    const claims = client.data?.roomAuth;
+    if (currentMember && !currentMember.presence && !activeRoom.completed &&
+        claims?.roomId === roomId && claims.userId === telegramId &&
+        claims.exp > Math.floor(Date.now() / 1000)) {
+      const id = randomUUID();
+      currentMember.presence = this.roomService.startPresence(id, roomId, telegramId, new Date(), effectiveUsername)
+        .then(started => started ? id : undefined)
+        .catch(() => {
+          this.logger.warn('Could not start room presence history');
+          return undefined;
+        });
+    }
     this.rememberSocketMembership(client.id, activeRoom.id, telegramId);
     this.recordReconnectSuccess(activeRoom.id, clientInstanceId);
     this.logger.log(
@@ -692,13 +846,15 @@ export class RoomGateway
         studentSelectionEnabled: activeRoom?.studentSelectionEnabled,
         studentEditCodeEnabled: activeRoom?.studentEditCodeEnabled,
       },
-      language: room.language,
+      language: activeRoom.language ?? room.language,
+      ...(activeRoom.lessonRevision ? { lesson: this.lessonState(activeRoom) } : {}),
       completed: room.completed,
     });
 
 
     client.emit('code-edit-action', {
-      update: Y.encodeStateAsUpdate(doc),
+      update: Y.encodeStateAsUpdate(this.docs.get(room.id) ?? doc),
+      lessonRevision: activeRoom.lessonRevision ?? 0,
     });
 
     client.emit('selection-state', {
@@ -712,11 +868,13 @@ export class RoomGateway
     @ConnectedSocket() client: Socket,
   ) {
     try {
-      if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+      if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+          !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
         return { ok: false, error: 'Сессия комнаты устарела' };
       }
       const doc = await this.getOrCreateDoc(data.roomId);
-      if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+      if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+          !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
         return { ok: false, error: 'Сессия комнаты устарела' };
       }
       const clientStateVector = this.normalizeBinaryUpdate(data.stateVector);
@@ -781,7 +939,8 @@ export class RoomGateway
         error: 'Редактирование кода отключено в этой комнате',
       };
     }
-    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+    if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+          !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
       return {
         ok: false,
         sequence: data.sequence,
@@ -793,6 +952,7 @@ export class RoomGateway
       data.roomId,
       data.telegramId,
       data.clientInstanceId,
+      String(data.lessonRevision ?? 0),
       String(data.sequence),
     ].join(':');
     const existingRequest = this.codeSyncRequests.get(requestKey);
@@ -802,7 +962,8 @@ export class RoomGateway
       try {
         const update = this.normalizeBinaryUpdate(data.update);
         const doc = await this.getOrCreateDoc(data.roomId);
-        if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+        if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+          !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
           return {
             ok: false,
             sequence: data.sequence,
@@ -824,6 +985,7 @@ export class RoomGateway
             userColor: member?.userColor,
             username: member?.username,
             update: integratedUpdate,
+            lessonRevision: data.lessonRevision ?? 0,
           });
         }
 
@@ -885,6 +1047,7 @@ export class RoomGateway
       return;
     }
     if (room.completed) return;
+    if (data.language !== undefined && !this.acceptsLessonRevision(room.id, data.lessonRevision)) return;
 
     if (
       data.language !== undefined &&
@@ -910,7 +1073,10 @@ export class RoomGateway
       }
       const updatedRoom = await this.roomService.changeLanguage(
         room.id, data.telegramId, data.language,
+        ...(room.lessonRevision !== undefined ? [room.lessonRevision] : []),
       );
+      const live = this.activeRooms.find(item => item.id === room.id);
+      if (live && (live.lessonRevision ?? 0) === (updatedRoom.lessonRevision ?? 0)) live.language = updatedRoom.language;
       this.server.to(room.id).emit('room-edited', fillDto(RoomRdo, updatedRoom));
       return;
     }
@@ -925,12 +1091,14 @@ export class RoomGateway
       language: data.language,
       telegramId: data.telegramId,
       taskId: data.taskId,
-    });
+    }, ...(data.language !== undefined && room.lessonRevision !== undefined ? [room.lessonRevision] : []));
 
     this.activeRooms = this.activeRooms.map((activeRoomItem) => {
       if (activeRoomItem.id === updatedRoom.id) {
         return {
           ...activeRoomItem,
+          ...(data.language !== undefined && (activeRoomItem.lessonRevision ?? 0) === (updatedRoom.lessonRevision ?? 0)
+            ? { language: updatedRoom.language } : {}),
           // Используем переданные значения или сохраняем текущие из activeRoom или room
           studentCursorEnabled:
             data.studentCursorEnabled !== undefined
@@ -1091,7 +1259,8 @@ export class RoomGateway
         message: 'Не указан telegramId',
       });
     }
-    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+    if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+        !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
       return client.emit('error', {
         message: 'Сессия комнаты устарела',
       });
@@ -1106,7 +1275,8 @@ export class RoomGateway
     }
 
     const doc = await this.getOrCreateDoc(data.roomId);
-    if (!this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
+    if (!this.acceptsLessonRevision(data.roomId, data.lessonRevision) ||
+        !this.isCurrentSocketMember(client, data.roomId, data.telegramId)) {
       return client.emit('error', {
         message: 'Сессия комнаты устарела',
       });
@@ -1129,6 +1299,7 @@ export class RoomGateway
       userColor: member?.userColor,
       username: member?.username,
       update: integratedUpdate,
+      lessonRevision: data.lessonRevision ?? 0,
     });
   }
 
@@ -1180,10 +1351,31 @@ export class RoomGateway
     }
 
     if (room.completed) return;
+    if (this.switchingLessons.has(room.id)) {
+      client.emit('error', { message: 'Дождитесь переключения задачи' });
+      return;
+    }
 
-    await this.flushRoomSnapshot(data.roomId, { force: true });
-
-    await this.roomService.completeRoom(data.roomId);
+    const active = this.activeRooms.find(item => item.id === room.id);
+    if (room.lessonRevision) {
+      this.switchingLessons.add(room.id);
+      try {
+        const doc = await this.getOrCreateDoc(room.id);
+        await this.snapshotFlushTasks.get(room.id);
+        await this.roomService.completeRoom(room.id, {
+          revision: room.lessonRevision,
+          language: room.language,
+          snapshot: Buffer.from(Y.encodeStateAsUpdate(doc)).toString('base64'),
+        });
+        if (active) active.completed = true;
+      } finally {
+        this.switchingLessons.delete(room.id);
+      }
+    } else {
+      await this.flushRoomSnapshot(data.roomId, { force: true });
+      await this.roomService.completeRoom(data.roomId);
+    }
+    if (active) await this.recordPresence(active.members, true);
 
     this.activeRooms = this.activeRooms.filter(
       (activeRoom) => activeRoom.id !== room.id,
@@ -1202,6 +1394,7 @@ export class RoomGateway
   ) {
     if (
       data.state !== 'hidden' ||
+      this.switchingLessons.has(data.roomId) ||
       !this.isCurrentSocketMember(client, data.roomId, data.telegramId)
     ) {
       return { ok: false };
@@ -1277,6 +1470,7 @@ export class RoomGateway
   }
 
   async beforeApplicationShutdown(signal?: string) {
+    await Promise.allSettled(this.activeRooms.map(room => this.recordPresence(room.members, true)));
     const roomIds = [...this.docs.keys()];
     if (roomIds.length === 0) {
       return;
@@ -1298,6 +1492,12 @@ export class RoomGateway
 
     const timer = setInterval(() => {
       void this.flushRoomSnapshot(roomId);
+      const active = this.activeRooms.find(room => room.id === roomId);
+      const now = Date.now();
+      if (active && !active.completed && now - (active.presenceHeartbeatAt ?? 0) >= 30_000) {
+        active.presenceHeartbeatAt = now;
+        void this.recordPresence(active.members.filter(member => member.online));
+      }
     }, this.SNAPSHOT_INTERVAL_MS);
     timer.unref?.();
 
@@ -1420,7 +1620,7 @@ export class RoomGateway
     const existingTask = this.snapshotFlushTasks.get(roomId);
     if (existingTask) return existingTask;
 
-    if (!force && !this.snapshotDirtyRooms.has(roomId)) return;
+    if (this.switchingLessons.has(roomId) || (!force && !this.snapshotDirtyRooms.has(roomId))) return;
 
     const task = (async () => {
       this.snapshotSavingRooms.add(roomId);
@@ -1439,7 +1639,9 @@ export class RoomGateway
           );
 
           if (this.lastPersistedSnapshots.get(roomId) !== snapshot) {
-            await this.roomService.saveRoomSnapshot(roomId, snapshot);
+            const revision = this.activeRooms.find(room => room.id === roomId)?.lessonRevision;
+            if (revision) await this.roomService.saveRoomSnapshot(roomId, snapshot, revision);
+            else await this.roomService.saveRoomSnapshot(roomId, snapshot);
             this.lastPersistedSnapshots.set(roomId, snapshot);
           }
 
@@ -1511,7 +1713,21 @@ export class RoomGateway
     this.resourceBudget.reserveRoom(roomId);
     const initTask = (async () => {
       const doc = new Y.Doc();
-      const snapshot = await this.roomService.getRoomSnapshot(roomId);
+      const snapshot = await this.roomService.getRoomSnapshot(roomId, (saved, task) => {
+        const legacy = new Y.Doc();
+        try {
+          if (saved) {
+            if (saved.length > Math.ceil(MAX_SNAPSHOT_BYTES / 3) * 4) throw new Error('Snapshot too large');
+            Y.applyUpdate(legacy, Buffer.from(saved, 'base64'));
+          } else if (task.initialCode) {
+            legacy.getText('codemirror').insert(0, task.initialCode);
+          }
+          insertLessonTemplate(legacy.getText('codemirror'), task);
+          return Buffer.from(this.resourceBudget.validate(roomId, legacy)).toString('base64');
+        } finally {
+          legacy.destroy();
+        }
+      });
 
       if (snapshot) {
         try {

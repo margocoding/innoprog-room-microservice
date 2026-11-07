@@ -40,6 +40,15 @@ model Room {
   studentSelectionEnabled Boolean      @default(false)
   studentEditCodeEnabled  Boolean      @default(false)
   completed               Boolean      @default(false)
+  lessonRevision          Int          @default(0)
+  lessonKey               String       @default("free")
+  lessonTask              Json?
+  lessonSnapshot          String?
+  lessonCodeInline        Boolean      @default(false)
+  lessonDrafts            RoomLessonDraft[]
+  lessonHistory           RoomLessonVisit[]
+  presenceHistory         RoomPresence[]
+  completedAt             DateTime?
   logs                    Log[]
   roomMembers             RoomMember[]
   createdAt               DateTime     @default(now())
@@ -67,4 +76,58 @@ model RoomMember {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model RoomLessonDraft {
+  roomId   String
+  key      String
+  language Language
+  snapshot String
+  codeInline Boolean @default(false)
+  room     Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, key])
+  @@map("room_lesson_drafts")
+}
+
+model PersonalLessonTask {
+  id        String   @id @default(uuid())
+  owner     String
+  moduleId  Int
+  payload   Json
+  createdAt DateTime @default(now())
+
+  @@index([owner, moduleId, createdAt])
+  @@map("personal_lesson_tasks")
+}
+
+model RoomLessonVisit {
+  roomId     String
+  revision   Int
+  taskKey    String
+  title      String
+  language   Language
+  startedAt  DateTime
+  endedAt    DateTime?
+  snapshot   String?
+  room       Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, revision])
+  @@map("room_lesson_visits")
+}
+
+model RoomPresence {
+  id           String @id
+  roomId       String
+  participant  String
+  displayName  String?
+  kind         String
+  role         String
+  joinedAt     DateTime
+  lastSeenAt   DateTime
+  leftAt       DateTime?
+  room         Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([roomId, joinedAt])
+  @@map("room_presence")
 }

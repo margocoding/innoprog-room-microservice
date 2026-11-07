@@ -28,7 +28,11 @@ async function bootstrap() {
     ],
   });
 
-  await app.listen(process.env.PORT ?? 3000);
+  if (process.env.ROOM_LISTEN_HOST === '127.0.0.1') {
+    await app.listen(process.env.PORT ?? 3000, '127.0.0.1');
+  } else {
+    await app.listen(process.env.PORT ?? 3000);
+  }
 }
 
 bootstrap();

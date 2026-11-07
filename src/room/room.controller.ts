@@ -1,9 +1,11 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
   ForbiddenException,
   Get,
+  Header,
   Logger,
   NotFoundException,
   Param,
@@ -46,6 +48,48 @@ export class RoomController {
     private readonly roomService: RoomService,
     private readonly appService: AppService,
   ) { }
+
+  private async lessonOwner(id: string, request: Request) {
+    const token = request.headers['x-room-token'];
+    const claims = typeof token === 'string' && token.length <= 4096
+      ? this.appService.verifyRoomToken(token, id) : undefined;
+    const room = claims && await this.roomService.getRoom(id);
+    if (!claims || !room || room.teacher !== claims.userId) {
+      throw new ForbiddenException('Выбор задач доступен владельцу комнаты');
+    }
+    return claims.userId;
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Get('/:id/lessons/modules')
+  async lessonModules(@Param('id') id: string, @Req() request: Request) {
+    return this.roomService.platformLesson(await this.lessonOwner(id, request), 'modules', request.headers['x-platform-auth']);
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Get('/:id/lessons/platform')
+  async lessonCatalog(@Param('id') id: string, @Req() request: Request, @Query() query: Record<string, unknown>) {
+    const owner = await this.lessonOwner(id, request);
+    if (typeof query.module !== 'string' || !/^\d{1,9}$/.test(query.module)) {
+      throw new BadRequestException('Выберите модуль');
+    }
+    const params = new URLSearchParams({ module: query.module });
+    if (typeof query.q === 'string') params.set('q', query.q.slice(0, 120));
+    if (typeof query.page === 'string' && /^\d{1,4}$/.test(query.page)) params.set('page', query.page);
+    return this.roomService.platformLesson(owner, 'tasks?' + params, request.headers['x-platform-auth']);
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Get('/:id/lessons/personal')
+  async personalLessons(@Param('id') id: string, @Req() request: Request) {
+    return this.roomService.listPersonalLessons(await this.lessonOwner(id, request));
+  }
+
+  @Header('Cache-Control', 'private, no-store')
+  @Post('/:id/lessons/personal')
+  async createPersonalLesson(@Param('id') id: string, @Req() request: Request, @Body() body: unknown) {
+    return this.roomService.createPersonalLesson(await this.lessonOwner(id, request), body);
+  }
 
   @Get('/:id/execution-access')
   async executionAccess(@Param('id') id: string, @Req() request: Request): Promise<{ ok: true; userId: string }> {

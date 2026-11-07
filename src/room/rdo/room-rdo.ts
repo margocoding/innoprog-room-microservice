@@ -1,8 +1,18 @@
 import { ApiProperty } from '@nestjs/swagger';
+import type { LessonTask } from '../lesson-task';
 import { Language } from '@prisma/client';
 import { Expose } from 'class-transformer';
 
 export class RoomRdo {
+  @Expose()
+  lessonRevision?: number;
+
+  @Expose()
+  lessonKey?: string;
+
+  @Expose()
+  lessonTask?: LessonTask | null;
+
   @ApiProperty({
     title: 'Room id',
     example: 'b5269a83-72cb-47ee-b8ab-4a7768565080',
