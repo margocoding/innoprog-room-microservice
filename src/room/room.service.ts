@@ -1,7 +1,8 @@
+import { createHmac } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { LessonTask, readLessonTask } from './lesson-task';
 import { Language, Prisma } from '@prisma/client';
-import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, ForbiddenException, BadRequestException, ServiceUnavailableException } from '@nestjs/common';
 import { fillDto } from 'helpers/fill-dto/fill-dto';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateRoomDto } from './dto/create-room-dto';
@@ -17,16 +18,24 @@ export class RoomService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async platformLesson(owner: string, path: string, credential: unknown) {
+  async platformLesson(owner: string, path: string) {
     const base = new URL(process.env.ROOM_LESSON_CATALOG_ORIGIN || 'https://api.innoprog.ru');
     const local = process.env.ROOM_LESSON_LOCAL_CATALOG === '1' && base.hostname === '127.0.0.1';
-    if (path !== 'modules' && !local && (typeof credential !== 'string' || !credential || credential.length > 4096)) {
-      throw new ForbiddenException('Войдите на платформу, чтобы открыть её задачи');
-    }
     const url = new URL('/platform/ide/lesson-catalog/' + path, base);
     url.searchParams.set('owner', owner);
+    const headers: Record<string, string> = {};
+    if (!local && path !== 'modules') {
+      const key = Buffer.from(process.env.ENCRYPT_TELEGRAM_ID_KEY || '', 'base64');
+      if (base.protocol !== 'https:' || key.length !== 32) {
+        throw new ServiceUnavailableException('Каталог временно недоступен');
+      }
+      const timestamp = Math.floor(Date.now() / 1000);
+      const message = `innoprog:room-catalog:v1\n${timestamp}\n${owner}\n${url.pathname}`;
+      const signature = createHmac('sha256', key).update(message).digest('hex');
+      headers['X-Room-Catalog-Authorization'] = `v1.${timestamp}.${signature}`;
+    }
     const response = await fetch(url, {
-      headers: local || path === 'modules' ? {} : { 'X-Platform-Auth': credential as string },
+      headers,
       redirect: 'error',
       signal: AbortSignal.timeout(5000),
     });
@@ -89,14 +98,14 @@ export class RoomService {
     });
   }
 
-  async resolveLesson(owner: string, source: string, id: unknown, credential: unknown) {
+  async resolveLesson(owner: string, source: string, id: unknown) {
     if (source === 'free') return { key: 'free', task: null };
     if (source === 'personal' && typeof id === 'string' && personalTaskId.test(id)) {
       const row = await this.prisma.personalLessonTask.findFirst({ where: { id, owner } });
       if (row) return { key: 'personal:' + id, task: readLessonTask(row.payload) };
     }
     if (source === 'platform' && typeof id === 'number' && Number.isSafeInteger(id) && id > 0) {
-      const raw = await this.platformLesson(owner, 'task/' + id, credential);
+      const raw = await this.platformLesson(owner, 'task/' + id);
       return { key: 'platform:' + id, task: { ...readLessonTask(raw, true), platformId: id } };
     }
     throw new NotFoundException('Задача не найдена');

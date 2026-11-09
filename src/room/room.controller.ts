@@ -63,7 +63,7 @@ export class RoomController {
   @Header('Cache-Control', 'private, no-store')
   @Get('/:id/lessons/modules')
   async lessonModules(@Param('id') id: string, @Req() request: Request) {
-    return this.roomService.platformLesson(await this.lessonOwner(id, request), 'modules', request.headers['x-platform-auth']);
+    return this.roomService.platformLesson(await this.lessonOwner(id, request), 'modules');
   }
 
   @Header('Cache-Control', 'private, no-store')
@@ -76,7 +76,7 @@ export class RoomController {
     const params = new URLSearchParams({ module: query.module });
     if (typeof query.q === 'string') params.set('q', query.q.slice(0, 120));
     if (typeof query.page === 'string' && /^\d{1,4}$/.test(query.page)) params.set('page', query.page);
-    return this.roomService.platformLesson(owner, 'tasks?' + params, request.headers['x-platform-auth']);
+    return this.roomService.platformLesson(owner, 'tasks?' + params);
   }
 
   @Header('Cache-Control', 'private, no-store')

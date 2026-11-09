@@ -571,7 +571,7 @@ export class RoomGateway
 
   @SubscribeMessage('room-lesson:select')
   async selectLesson(
-    @MessageBody() data: JoinPayload & { source: string; id?: unknown; credential?: unknown; revision: number },
+    @MessageBody() data: JoinPayload & { source: string; id?: unknown; revision: number },
     @ConnectedSocket() client: Socket,
   ) {
     const room = this.activeRooms.find(item => item.id === data.roomId);
@@ -589,7 +589,7 @@ export class RoomGateway
     let selection: Awaited<ReturnType<RoomService['resolveLesson']>>;
     this.resolvingLessons.add(room.id);
     try {
-      selection = await this.roomService.resolveLesson(room.teacher, data.source, data.id, data.credential);
+      selection = await this.roomService.resolveLesson(room.teacher, data.source, data.id);
     } catch (error) {
       return { ok: false, error: error?.getStatus?.() < 500 ? error.message : 'Не удалось загрузить задачу' };
     } finally {
