@@ -1202,6 +1202,38 @@ export class RoomGateway
     });
   }
 
+  @SubscribeMessage('room-focus') handleRoomFocus(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: {
+      roomId: string;
+      telegramId: string;
+      lessonRevision: number;
+      taskId: string | null;
+      target: { panel: 'code' | 'task'; index: number; offset: number };
+    },
+  ) {
+    if (
+      typeof data?.roomId !== 'string' ||
+      !Number.isSafeInteger(data.lessonRevision) ||
+      (data.taskId !== null &&
+        (typeof data.taskId !== 'string' || data.taskId.length > 128)) ||
+      (data.target?.panel !== 'code' && data.target?.panel !== 'task') ||
+      !Number.isSafeInteger(data.target.index) || data.target.index < 0 ||
+      !Number.isFinite(data.target.offset)
+    ) return;
+
+    const { roomId, telegramId, lessonRevision, taskId, target } = data;
+    const room = this.activeRooms.find((item) => item.id === roomId);
+    if (!room || room.completed || room.teacher !== telegramId ||
+        !this.isCurrentSocketMember(client, roomId, telegramId) ||
+        !this.acceptsLessonRevision(roomId, lessonRevision)) return;
+
+    client.broadcast.to(roomId).emit('room-focus-action', {
+      roomId, lessonRevision, taskId,
+      target: { panel: target.panel, index: target.index, offset: target.offset },
+    });
+  }
+
   @SubscribeMessage('selection') handleSelection(
     client: Socket,
     data: SelectionPayload,

@@ -1078,6 +1078,28 @@ describe('RoomGateway events', () => {
     }
   });
 
+  it('lets only the current owner show a place, even with student cursors disabled', async () => {
+    const { gateway } = createGateway(createRoom({ lessonRevision: 3, studentCursorEnabled: false }));
+    const owner = createClient('owner');
+    const student = createClient('student');
+    await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'teacher-1' }, owner);
+    await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'student-1' }, student);
+    const payload = {
+      roomId: 'room-1', telegramId: 'teacher-1', lessonRevision: 3, taskId: null,
+      target: { panel: 'code' as const, index: 42, offset: 175 },
+    };
+    gateway.handleRoomFocus(student, { ...payload, telegramId: 'student-1' });
+    gateway.handleRoomFocus(student, payload);
+    gateway.handleRoomFocus(owner, { ...payload, lessonRevision: 2 });
+    expect(student.broadcast.to).not.toHaveBeenCalled();
+    expect(owner.broadcast.to).not.toHaveBeenCalled();
+
+    gateway.handleRoomFocus(owner, payload);
+    expect(owner.broadcast.to.mock.results[0].value.emit).toHaveBeenCalledWith(
+      'room-focus-action', { roomId: 'room-1', lessonRevision: 3, taskId: null, target: payload.target },
+    );
+  });
+
   it('tracks caret, range and cleared selections', () => {
     const { gateway } = createGateway();
     const client = createClient('socket');
