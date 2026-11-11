@@ -88,6 +88,14 @@ interface CursorPayload {
   telegramId: string;
 }
 
+interface TaskScrollPayload {
+  roomId: string;
+  telegramId: string;
+  lessonRevision: number;
+  taskId: string | null;
+  progress: number;
+}
+
 interface SelectionPayload {
   roomId: string;
   telegramId: string;
@@ -1167,6 +1175,31 @@ export class RoomGateway
     };
 
     client.broadcast.to(activeRoom.id).emit('cursor-action', cursorData);
+  }
+
+  @SubscribeMessage('task-scroll') handleTaskScroll(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: TaskScrollPayload,
+  ) {
+    if (
+      typeof data?.roomId !== 'string' ||
+      !Number.isSafeInteger(data.lessonRevision) ||
+      (data.taskId !== null &&
+        (typeof data.taskId !== 'string' || data.taskId.length > 128)) ||
+      !Number.isFinite(data.progress) ||
+      data.progress < 0 || data.progress > 1
+    ) return;
+
+    const { roomId, telegramId, lessonRevision, taskId, progress } = data;
+    if (!this.isCurrentSocketMember(client, roomId, telegramId)) return;
+
+    const room = this.activeRooms.find((item) => item.id === roomId);
+    if (!room?.studentCursorEnabled || room.completed ||
+        !this.acceptsLessonRevision(roomId, lessonRevision)) return;
+
+    client.broadcast.to(roomId).emit('task-scroll-action', {
+      roomId, lessonRevision, taskId, progress,
+    });
   }
 
   @SubscribeMessage('selection') handleSelection(

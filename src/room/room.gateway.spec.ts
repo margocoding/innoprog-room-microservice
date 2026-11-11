@@ -1049,6 +1049,35 @@ describe('RoomGateway events', () => {
     );
   });
 
+  it.each([
+    ['joined member', {}, {}, true],
+    ['disabled cursors', { studentCursorEnabled: false }, {}, false],
+    ['completed room', { completed: true }, {}, false],
+    ['previous lesson', {}, { lessonRevision: 2 }, false],
+    ['invalid progress', {}, { progress: Infinity }, false],
+    ['nonmember socket', {}, { outsider: true }, false],
+  ] as const)('shares task scrolling only when allowed: %s', async (_name, room, overrides, expected) => {
+    const { gateway } = createGateway(createRoom({ lessonRevision: 3, ...room }));
+    const teacher = createClient('owner');
+    const student = createClient('student');
+    await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'teacher-1' }, teacher);
+    if (!('outsider' in overrides)) {
+      await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'student-1' }, student);
+    }
+    gateway.handleTaskScroll(student, {
+      roomId: 'room-1', telegramId: 'student-1', lessonRevision: 3,
+      taskId: null, progress: 0.5, ...overrides,
+    });
+    if (expected) {
+      expect(student.broadcast.to).toHaveBeenCalledWith('room-1');
+      expect(student.broadcast.to.mock.results.at(-1).value.emit).toHaveBeenCalledWith(
+        'task-scroll-action', { roomId: 'room-1', lessonRevision: 3, taskId: null, progress: 0.5 },
+      );
+    } else {
+      expect(student.broadcast.to).not.toHaveBeenCalled();
+    }
+  });
+
   it('tracks caret, range and cleared selections', () => {
     const { gateway } = createGateway();
     const client = createClient('socket');
