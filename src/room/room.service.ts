@@ -10,6 +10,22 @@ import { EditRoomDto } from './dto/edit-room-dto';
 import { GetRoomsDto } from './dto/get-rooms-dto';
 import { RoomRdo } from './rdo/room-rdo';
 
+const roomFields = {
+  id: true,
+  students: true,
+  teacher: true,
+  taskId: true,
+  language: true,
+  studentCursorEnabled: true,
+  studentSelectionEnabled: true,
+  studentEditCodeEnabled: true,
+  completed: true,
+  lessonRevision: true,
+  lessonKey: true,
+  lessonTask: true,
+  createdAt: true,
+} satisfies Prisma.RoomSelect;
+
 const personalTaskId = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 
 @Injectable()
@@ -283,7 +299,8 @@ export class RoomService {
     const [rooms, total] = await Promise.all([
       this.prisma.room.findMany({
         where,
-        include: {
+        select: {
+          ...roomFields,
           roomMembers: {
             select: {
               telegramId: true,
@@ -299,18 +316,13 @@ export class RoomService {
     ]);
 
     return {
-      rooms: rooms.map((room) =>
-        fillDto(RoomRdo, {
+      rooms: rooms.map(({ roomMembers, ...room }) => {
+        const usernames = new Map(roomMembers.map(member => [member.telegramId, member.username]));
+        return fillDto(RoomRdo, {
           ...room,
-          students: room.students.map((studentTelegramId) => {
-            const roomMember = room.roomMembers.find(
-              (member) => member.telegramId === studentTelegramId,
-            );
-
-            return roomMember?.username || studentTelegramId;
-          }),
-        }),
-      ),
+          students: room.students.map(id => usernames.get(id) || id),
+        });
+      }),
       total,
     };
   }
@@ -318,6 +330,7 @@ export class RoomService {
   async getRoom(id: string) {
     const room = await this.prisma.room.findUnique({
       where: { id },
+      select: roomFields,
     });
 
     return room ? fillDto(RoomRdo, room) : null;

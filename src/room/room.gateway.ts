@@ -64,7 +64,6 @@ interface Room {
   studentEditCodeEnabled: boolean;
   completed: boolean;
   lessonRevision?: number;
-  presenceHeartbeatAt?: number;
   lessonKey?: string;
   lessonTask?: LessonTask | null;
   language?: Language;
@@ -238,6 +237,7 @@ export class RoomGateway
   private docs = new Map<string, Y.Doc>();
   private docInitTasks = new Map<string, Promise<Y.Doc>>();
   private timers = new Map<string, NodeJS.Timeout>();
+  private presenceHeartbeat?: NodeJS.Timeout;
   private snapshotDebounceTimers = new Map<string, NodeJS.Timeout>();
   private snapshotDirtyRooms = new Set<string>();
   private snapshotSavingRooms = new Set<string>();
@@ -490,9 +490,9 @@ export class RoomGateway
         continue;
       }
 
+      void this.recordPresence(members, true);
       for (const member of members) {
         member.online = false;
-        void this.recordPresence([member], true);
         member.lastSelection = undefined;
         this.forgetSocketMembership(client.id, room.id);
 
@@ -1540,7 +1540,8 @@ export class RoomGateway
   }
 
   async beforeApplicationShutdown(signal?: string) {
-    await Promise.allSettled(this.activeRooms.map(room => this.recordPresence(room.members, true)));
+    this.stopPresenceHeartbeat();
+    await this.recordPresence(this.activeRooms.flatMap(room => room.members), true);
     const roomIds = [...this.docs.keys()];
     if (roomIds.length === 0) {
       return;
@@ -1562,16 +1563,24 @@ export class RoomGateway
 
     const timer = setInterval(() => {
       void this.flushRoomSnapshot(roomId);
-      const active = this.activeRooms.find(room => room.id === roomId);
-      const now = Date.now();
-      if (active && !active.completed && now - (active.presenceHeartbeatAt ?? 0) >= 30_000) {
-        active.presenceHeartbeatAt = now;
-        void this.recordPresence(active.members.filter(member => member.online));
-      }
     }, this.SNAPSHOT_INTERVAL_MS);
     timer.unref?.();
 
     this.timers.set(roomId, timer);
+    if (!this.presenceHeartbeat) {
+      this.presenceHeartbeat = setInterval(() => {
+        const members = this.activeRooms.flatMap(
+          room => room.completed ? [] : room.members.filter(member => member.online),
+        );
+        void this.recordPresence(members);
+      }, 30_000);
+      this.presenceHeartbeat.unref?.();
+    }
+  }
+
+  private stopPresenceHeartbeat(): void {
+    clearInterval(this.presenceHeartbeat);
+    this.presenceHeartbeat = undefined;
   }
 
   private markRoomSnapshotDirty(roomId: string): number {
@@ -1649,6 +1658,7 @@ export class RoomGateway
     if (timer) {
       clearInterval(timer);
       this.timers.delete(roomId);
+      if (!this.timers.size) this.stopPresenceHeartbeat();
     }
 
     const debounceTimer = this.snapshotDebounceTimers.get(roomId);

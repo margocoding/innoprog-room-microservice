@@ -932,6 +932,31 @@ describe('RoomGateway membership sync', () => {
     );
   });
 
+  it('records presence across active rooms in one write per heartbeat and on shutdown', async () => {
+    const { gateway, roomService } = createGateway();
+    const startPresence = jest.fn().mockResolvedValue(true);
+    const recordPresence = jest.fn().mockResolvedValue(undefined);
+    Object.assign(roomService, { startPresence, recordPresence });
+    roomService.getRoom.mockImplementation(async id => createRoom({ id }));
+
+    for (const roomId of ['room-1', 'room-2']) {
+      const client = createClient(roomId);
+      client.data = { roomAuth: { roomId, userId: 'teacher-1', exp: Math.floor(Date.now() / 1000) + 60 } };
+      await gateway.handleJoinRoom({ roomId, telegramId: 'teacher-1' }, client);
+    }
+    const ids = startPresence.mock.calls.map(([id]) => id);
+    expect(ids).toHaveLength(2);
+
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(recordPresence).toHaveBeenCalledTimes(1);
+    expect(recordPresence).toHaveBeenLastCalledWith(ids, expect.any(Date), false);
+
+    await gateway.beforeApplicationShutdown('SIGTERM');
+    await jest.advanceTimersByTimeAsync(30_000);
+    expect(recordPresence).toHaveBeenCalledTimes(2);
+    expect(recordPresence).toHaveBeenLastCalledWith(ids, expect.any(Date), true);
+  });
+
   it('flushes active room snapshots before application shutdown', async () => {
     const { gateway, roomService } = createGateway();
     const teacher = createClient('socket-teacher');
