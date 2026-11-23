@@ -125,7 +125,6 @@ describe('RoomService', () => {
     expect(prisma.room.update).toHaveBeenCalledWith({
       where: {
         id: 'room-1', completed: false,
-        NOT: { lessonKey: { startsWith: 'platform:' } },
         OR: [{ teacher: 'student-1' }, { students: { has: 'student-1' } }],
       },
       data: { language: 'js' },

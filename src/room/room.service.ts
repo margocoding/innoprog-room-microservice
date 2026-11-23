@@ -172,7 +172,7 @@ export class RoomService {
           update: { language: draftLanguage, snapshot: outgoing, codeInline: true },
         });
       }
-      const language = task?.platformId ? task.language : sameDocument ? draftLanguage : draft?.language ?? task?.language ?? room.language;
+      const language = sameDocument ? draftLanguage : draft?.language ?? task?.language ?? room.language;
       const now = new Date();
       await tx.roomLessonVisit.updateMany({
         where: { roomId: id, revision, endedAt: null },
@@ -227,7 +227,6 @@ export class RoomService {
       const editedRoom = await this.prisma.room.update({
         where: {
           id, teacher: dto.telegramId, lessonRevision,
-          ...(dto.language !== undefined && { NOT: { lessonKey: { startsWith: 'platform:' } } }),
         },
         data: {
           ...(dto.taskId !== undefined && { taskId: dto.taskId }),
@@ -259,7 +258,6 @@ export class RoomService {
       where: {
         id,
         completed: false,
-        NOT: { lessonKey: { startsWith: 'platform:' } },
         lessonRevision,
         OR: [{ teacher: telegramId }, { students: { has: telegramId } }],
       },

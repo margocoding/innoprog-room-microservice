@@ -136,14 +136,17 @@ describe('RoomGateway membership sync', () => {
     );
   });
 
-  it('persists and broadcasts language changes from a joined student', async () => {
-    const { gateway, roomService, roomEmit } = createGateway();
+  it.each([
+    ['free', 0],
+    ['platform:42', 1],
+  ])('persists and broadcasts language changes from a joined student in %s', async (lessonKey, lessonRevision) => {
+    const { gateway, roomService, roomEmit } = createGateway(createRoom({ lessonKey, lessonRevision }));
     const student = createClient('student-socket');
     await gateway.handleJoinRoom({ roomId: 'room-1', telegramId: 'student-1' }, student);
     await gateway.handleEditRoom(student, {
-      roomId: 'room-1', telegramId: 'student-1', language: 'js',
+      roomId: 'room-1', telegramId: 'student-1', language: 'js', lessonRevision,
     } as any);
-    expect(roomService.changeLanguage).toHaveBeenCalledWith('room-1', 'student-1', 'js');
+    expect(roomService.changeLanguage).toHaveBeenCalledWith('room-1', 'student-1', 'js', lessonRevision);
     expect(roomService.editRoom).not.toHaveBeenCalled();
     expect(roomEmit).toHaveBeenCalledWith('room-edited', expect.objectContaining({ language: 'js' }));
   });
