@@ -37,8 +37,9 @@ model Room {
   taskId                  String?
   language                Language     @default(py)
   studentCursorEnabled    Boolean      @default(false)
-  studentSelectionEnabled Boolean      @default(false)
-  studentEditCodeEnabled  Boolean      @default(false)
+  studentSelectionEnabled Boolean      @default(true)
+  studentEditCodeEnabled  Boolean      @default(true)
+  sharedConsoleEnabled    Boolean      @default(true)
   completed               Boolean      @default(false)
   lessonRevision          Int          @default(0)
   lessonKey               String       @default("free")
@@ -130,4 +131,11 @@ model RoomPresence {
 
   @@index([roomId, joinedAt])
   @@map("room_presence")
+}
+
+model IdeSharedConsoleIntro {
+  accountId String   @id
+  seenAt    DateTime @default(now())
+
+  @@map("ide_shared_console_intro")
 }

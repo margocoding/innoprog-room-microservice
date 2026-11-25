@@ -19,6 +19,7 @@ const roomFields = {
   studentCursorEnabled: true,
   studentSelectionEnabled: true,
   studentEditCodeEnabled: true,
+  sharedConsoleEnabled: true,
   completed: true,
   lessonRevision: true,
   lessonKey: true,
@@ -200,8 +201,8 @@ export class RoomService {
       data: {
         teacher: dto.telegramId,
         studentCursorEnabled: dto.studentCursorEnabled,
-        studentEditCodeEnabled: dto.studentEditCodeEnabled,
-        studentSelectionEnabled: dto.studentSelectionEnabled,
+        studentEditCodeEnabled: dto.studentEditCodeEnabled ?? true,
+        studentSelectionEnabled: dto.studentSelectionEnabled ?? true,
         taskId: dto.taskId,
       },
     });
@@ -323,6 +324,24 @@ export class RoomService {
       }),
       total,
     };
+  }
+
+  async setSharedConsole(roomId: string, teacher: string, enabled: boolean) {
+    const result = await this.prisma.room.updateMany({
+      where: { id: roomId, teacher, completed: false },
+      data: { sharedConsoleEnabled: enabled },
+    });
+    return result.count === 1;
+  }
+
+  async hasSeenSharedConsoleIntro(accountId: string) {
+    return Boolean(await this.prisma.ideSharedConsoleIntro.findUnique({ where: { accountId } }));
+  }
+
+  async acknowledgeSharedConsoleIntro(accountId: string) {
+    await this.prisma.ideSharedConsoleIntro.upsert({
+      where: { accountId }, create: { accountId }, update: {},
+    });
   }
 
   async getRoom(id: string) {

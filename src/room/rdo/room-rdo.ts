@@ -5,6 +5,9 @@ import { Expose } from 'class-transformer';
 
 export class RoomRdo {
   @Expose()
+  sharedConsoleEnabled?: boolean;
+
+  @Expose()
   lessonRevision?: number;
 
   @Expose()

@@ -90,6 +90,15 @@ describe('RoomService', () => {
     expect(result.id).toBe('room-1');
   });
 
+  it('enables selections and editing when room creation omits both settings', async () => {
+    prisma.room.create.mockResolvedValue(room({ sharedConsoleEnabled: true }));
+    await expect(service.createRoom({ telegramId: 'teacher-1' } as any))
+      .resolves.toMatchObject({ sharedConsoleEnabled: true });
+    expect(prisma.room.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      studentSelectionEnabled: true, studentEditCodeEnabled: true,
+    }) });
+  });
+
   it('persists the teacher display name when the room is created', async () => {
     prisma.room.create.mockResolvedValue(room());
     prisma.roomMember.upsert.mockResolvedValue({

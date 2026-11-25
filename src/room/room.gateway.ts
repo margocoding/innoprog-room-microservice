@@ -1,3 +1,4 @@
+import { SharedConsole } from './shared-console';
 import { insertLessonTemplate, type LessonTask } from './lesson-task';
 import {
   ConnectedSocket,
@@ -63,6 +64,7 @@ interface Room {
   studentSelectionEnabled: boolean;
   studentEditCodeEnabled: boolean;
   completed: boolean;
+  sharedConsoleEnabled?: boolean;
   lessonRevision?: number;
   lessonKey?: string;
   lessonTask?: LessonTask | null;
@@ -232,6 +234,9 @@ export class RoomGateway
     process.env.ROOM_SNAPSHOT_ACK_TIMEOUT_MS ?? 10_000,
   );
   private readonly resourceBudget = new RoomResourceBudget();
+  private readonly sharedConsoles = new Map<string, SharedConsole>();
+  private readonly savingSharedConsole = new Set<string>();
+  private readonly consoleEventRates = new Map<string, { started: number; count: number }>();
   private readonly resolvingLessons = new Set<string>();
   private readonly switchingLessons = new Set<string>();
   private docs = new Map<string, Y.Doc>();
@@ -431,6 +436,7 @@ export class RoomGateway
     roomId: string,
     notifyUser: boolean,
   ) {
+    this.sharedConsoles.get(roomId)?.leave(clientId);
     this.forgetSocketMembership(clientId, roomId);
 
     const socket = this.getSocketById(clientId);
@@ -484,6 +490,7 @@ export class RoomGateway
         continue;
       }
 
+      this.sharedConsoles.get(room.id)?.leave(client.id);
       const members = room.members.filter((m) => m.clientId === client.id);
       if (members.length === 0) {
         this.forgetSocketMembership(client.id, room.id);
@@ -577,6 +584,100 @@ export class RoomGateway
     return !this.switchingLessons.has(roomId) && (revision ?? 0) === current;
   }
 
+  @SubscribeMessage('room-console')
+  async handleSharedConsole(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: JoinPayload & {
+      revision?: number; action: string; enabled?: boolean; id?: string;
+      mode?: unknown; snapshot?: unknown; version?: number; update?: unknown;
+      position?: unknown; type?: unknown; field?: unknown; value?: unknown;
+    },
+  ) {
+    const room = this.activeRooms.find(item => item.id === data.roomId);
+    if (!room || room.completed || !this.isCurrentSocketMember(client, room.id, data.telegramId) ||
+        (room.lessonRevision ?? 0) !== (data.revision ?? 0)) return { ok: false };
+
+    const now = Date.now();
+    let rate = this.consoleEventRates.get(client.id);
+    if (!rate || now - rate.started >= 1000) {
+      rate = { started: now, count: 0 };
+      this.consoleEventRates.set(client.id, rate);
+    }
+    if (++rate.count > 120) return { ok: false };
+
+    const send = (target: string, event: string, value: unknown) => {
+      this.server.to(target).emit('room-console:' + event, { roomId: room.id, revision: room.lessonRevision ?? 0, value });
+    };
+    const current = this.sharedConsoles.get(room.id);
+    const getOrCreateConsole = () => {
+      if (current) return current;
+      const console = new SharedConsole((event, value) => send(room.id, event, value), send);
+      this.sharedConsoles.set(room.id, console);
+      return console;
+    };
+    if (data.action === 'intro' || data.action === 'intro-ack') {
+      const auth = client.data?.roomAuth;
+      if (!/^-?\d+$/.test(data.telegramId) || auth?.userId !== data.telegramId ||
+          auth.roomId !== room.id || auth.exp <= Math.floor(now / 1000)) return { ok: false };
+      try {
+        if (data.action === 'intro') {
+          return { ok: true, seen: await this.roomService.hasSeenSharedConsoleIntro(auth.userId) };
+        }
+        await this.roomService.acknowledgeSharedConsoleIntro(auth.userId);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      }
+    }
+
+    if (data.action === 'read') {
+      return {
+        ok: true, enabled: room.sharedConsoleEnabled !== false, run: current?.read() ?? null,
+        batchForm: current?.readBatchForm() ?? null,
+      };
+    }
+    if (data.action === 'toggle') {
+      if (typeof data.enabled !== 'boolean' || room.teacher !== data.telegramId ||
+          this.savingSharedConsole.has(room.id)) return { ok: false };
+      this.savingSharedConsole.add(room.id);
+      try {
+        if (!await this.roomService.setSharedConsole(room.id, room.teacher, data.enabled)) return { ok: false };
+        const live = this.activeRooms.find(item => item.id === room.id);
+        if (!live || live.completed) return { ok: true };
+        live.sharedConsoleEnabled = data.enabled;
+        if (!data.enabled) this.sharedConsoles.get(room.id)?.disableSharing();
+        send(room.id, 'toggle', data.enabled);
+        return { ok: true };
+      } catch {
+        return { ok: false };
+      } finally {
+        this.savingSharedConsole.delete(room.id);
+      }
+    }
+
+    if (room.sharedConsoleEnabled === false) return { ok: false };
+    if (data.action === 'start') {
+      if (this.switchingLessons.has(room.id) || room.language === 'html' ||
+          (data.mode === 'console' && room.language === 'sql')) return { ok: false };
+      return getOrCreateConsole().start(client, data.mode);
+    }
+    if (data.action === 'batch-open' &&
+        !this.switchingLessons.has(room.id) && room.language !== 'html') getOrCreateConsole().openBatchForm();
+    if (data.action === 'batch-close') current?.closeBatchForm();
+    if (data.action === 'batch-option') current?.updateBatchOptions(data.field, data.value);
+    if (data.action === 'batch-cursor' && room.studentSelectionEnabled) {
+      current?.batchCursor(client.id, data.telegramId, data.field, data.position);
+    }
+    if (data.action === 'batch-edit') return current?.editBatchForm(data.update) ?? { ok: false };
+    if (data.action === 'update') current?.update(client, data.id, data.snapshot);
+    if (data.action === 'cursor' && room.studentSelectionEnabled) {
+      current?.cursor(client.id, data.telegramId, data.id, data.version, data.position);
+    }
+    if (data.action === 'edit') return current?.edit(data.id, data.version, data.update) ?? { ok: false };
+    if (data.action === 'control') return current?.control(data.id, data.version, data.type) ?? { ok: false };
+    return { ok: true };
+  }
+
   @SubscribeMessage('room-lesson:select')
   async selectLesson(
     @MessageBody() data: JoinPayload & { source: string; id?: unknown; revision: number },
@@ -640,6 +741,8 @@ export class RoomGateway
         this.snapshotDirtyRooms.delete(room.id);
         this.lastPersistedSnapshots.delete(room.id);
         const live = this.activeRooms.find(item => item.id === room.id) ?? room;
+        this.sharedConsoles.get(room.id)?.reset();
+        this.sharedConsoles.delete(room.id);
         live.lessonKey = next.lessonKey;
         live.lessonRevision = next.lessonRevision;
         live.lessonTask = next.lessonTask;
@@ -722,6 +825,7 @@ export class RoomGateway
         studentSelectionEnabled: room.studentSelectionEnabled ?? true,
         studentEditCodeEnabled: room.studentEditCodeEnabled ?? true,
         completed: room.completed,
+        sharedConsoleEnabled: room.sharedConsoleEnabled,
         teacher: room.teacher,
       };
       this.activeRooms.push(activeRoom);
@@ -1127,6 +1231,12 @@ export class RoomGateway
       return activeRoomItem;
     });
 
+    if (data.studentSelectionEnabled === false) {
+      const live = this.activeRooms.find(item => item.id === room.id);
+      for (const member of live?.members ?? []) member.lastSelection = undefined;
+      this.sharedConsoles.get(room.id)?.clearCursors();
+    }
+
     this.server
       .to(data.roomId)
       .emit('room-edited', fillDto(RoomRdo, updatedRoom));
@@ -1242,11 +1352,7 @@ export class RoomGateway
 
     if (activeRoom.completed && activeRoom.teacher !== data.telegramId) return;
 
-    if (
-      !activeRoom.studentSelectionEnabled &&
-      activeRoom.teacher !== data.telegramId
-    )
-      return;
+    if (!activeRoom.studentSelectionEnabled) return;
 
     const member = activeRoom.members.find(
       (m) => m.telegramId === data.telegramId,
@@ -1527,6 +1633,7 @@ export class RoomGateway
         }),
       );
     }
+    this.consoleEventRates.delete(client.id);
     this.resourceBudget.releaseSocket(client.id);
     this.disconnectReasons.delete(client.id);
     this.intentionalDisconnectReasons.delete(client.id);
@@ -1648,6 +1755,8 @@ export class RoomGateway
   }
 
   private cleanupRoomState(roomId: string): void {
+    this.sharedConsoles.get(roomId)?.reset();
+    this.sharedConsoles.delete(roomId);
     const timer = this.timers.get(roomId);
     if (timer) {
       clearInterval(timer);
